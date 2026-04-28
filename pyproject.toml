@@ -1,0 +1,65 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "renpho-escs20m"
+dynamic = ["version"]
+authors = [
+  { name = "Ron", email = "ronnnnnnn@gmail.com" },
+]
+description = "Standalone Python client for the Renpho ES-CS20M BLE scale."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+keywords = [
+    "renpho",
+    "es-cs20m",
+    "smart scale",
+    "fitness scale",
+    "bluetooth",
+    "ble",
+    "weight",
+    "iot",
+    "health",
+]
+classifiers = [
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Home Automation",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+dependencies = [
+    "bleak>=2.0.0,<3.0.0",
+    "bleak_retry_connector>=4.0.0,<5.0.0",
+]
+
+[project.optional-dependencies]
+tests = [
+    "pytest",
+    "pytest-asyncio",
+]
+
+[project.urls]
+"Homepage" = "https://github.com/ronnnnnnnnnnnnn/renpho-escs20m"
+"Bug Tracker" = "https://github.com/ronnnnnnnnnnnnn/renpho-escs20m/issues"
+"Documentation" = "https://github.com/ronnnnnnnnnnnnn/renpho-escs20m#readme"
+"Source Code" = "https://github.com/ronnnnnnnnnnnnn/renpho-escs20m"
+
+[tool.hatch.version]
+path = "src/renpho_escs20m/_version.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/renpho_escs20m"]
+universal2 = true
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/src",
+    "/CHANGELOG.md",
+]
