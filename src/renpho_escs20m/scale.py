@@ -25,10 +25,12 @@ from bleak_retry_connector import establish_connection
 
 from .body_metrics import Sex
 from .const import (
+    BATTERY_LEVEL_CHARACTERISTIC_UUID,
     BODY_FAT_KEY,
     CMD_END_MEASUREMENT,
     CMD_SET_DISPLAY_UNIT,
     COMMAND_CHARACTERISTIC_UUID,
+    FIRMWARE_REVISION_CHARACTERISTIC_UUID,
     NOTIFY_CHARACTERISTIC_UUID,
     RESISTANCE_1_KEY,
     RESISTANCE_2_KEY,
@@ -53,6 +55,8 @@ if _IS_LINUX:
 
 
 _EPOCH_OFFSET = 946656000
+
+_DEVICE_METADATA_READ_TIMEOUT_SECONDS = 1.0
 
 _MEASUREMENT_STATUS_UNSTABLE = 0
 _MEASUREMENT_STATUS_STABLE = 1
@@ -328,6 +332,60 @@ def parse_weight(payload: bytearray) -> dict[str, int | float | None]:
     return data
 
 
+async def _read_device_metadata(
+    client: BleakClient,
+) -> tuple[int | None, str | None]:
+    """Read battery level and firmware revision from the scale.
+
+    Each read is independent and best-effort: any failure (characteristic
+    absent, slow response, BLE error, decode error, or empty payload returns
+    ``None`` for that value without raising. Returns
+    ``(battery_level, firmware_revision)``.
+
+    The two reads run concurrently to minimize connect-path latency. The helper
+    applies a short timeout per field so unsupported or slow characteristics do
+    not block startup.
+    """
+    async def read_battery() -> int | None:
+        try:
+            char = client.services.get_characteristic(
+                BATTERY_LEVEL_CHARACTERISTIC_UUID
+            )
+            if char is not None:
+                data = await asyncio.wait_for(
+                    client.read_gatt_char(char),
+                    timeout=_DEVICE_METADATA_READ_TIMEOUT_SECONDS,
+                )
+                if not data:
+                    return None
+                return data[0]
+        except Exception:
+            _LOGGER.debug(
+                "ES-CS20M failed to read battery level", exc_info=True
+            )
+        return None
+
+    async def read_firmware() -> str | None:
+        try:
+            char = client.services.get_characteristic(
+                FIRMWARE_REVISION_CHARACTERISTIC_UUID
+            )
+            if char is not None:
+                data = await asyncio.wait_for(
+                    client.read_gatt_char(char),
+                    timeout=_DEVICE_METADATA_READ_TIMEOUT_SECONDS,
+                )
+                return data.decode("utf-8").strip(" \t\n\r\x00") or None
+        except Exception:
+            _LOGGER.debug(
+                "ES-CS20M failed to read firmware revision", exc_info=True
+            )
+        return None
+
+    battery, firmware = await asyncio.gather(read_battery(), read_firmware())
+    return battery, firmware
+
+
 class RenphoESCS20MScale:
     """
     Renpho ES-CS20M BLE scale.
@@ -382,6 +440,8 @@ class RenphoESCS20MScale:
         self._cooldown_end_time: float = 0
         self._display_unit: WeightUnit = WeightUnit(display_unit)
         self._state_mask = 0
+        self._battery_level: int | None = None
+        self._firmware_revision: str | None = None
 
         if profile is None:
             self._fixed_profile: Profile | None = None
@@ -428,6 +488,33 @@ class RenphoESCS20MScale:
         self._lock = asyncio.Lock()
 
     @property
+    def battery_level(self) -> int | None:
+        """Last successfully-read battery level.
+
+        Normally 0-100 (percent), per the BLE SIG definition. Out-of-range
+        values (e.g. 255) are passed through unmodified rather than clamped
+        or rejected, so a misbehaving firmware can surface here for the
+        consumer to handle — don't assume the value is always within range.
+
+        ``None`` until the first successful read on the first connection.
+        Persists across disconnects: a transient read failure does not
+        clobber a previously-cached value.
+        """
+        return self._battery_level
+
+    @property
+    def firmware_revision(self) -> str | None:
+        """Last successfully-read firmware revision string, stripped of
+        whitespace and null bytes.
+
+        ``None`` until the first successful read on the first connection,
+        or if the device's firmware-revision characteristic returned an
+        empty/whitespace-only payload. Persists across disconnects: a
+        transient read failure does not clobber a previously-cached value.
+        """
+        return self._firmware_revision
+
+    @property
     def display_unit(self) -> WeightUnit:
         return self._display_unit
 
@@ -436,6 +523,20 @@ class RenphoESCS20MScale:
         if value is None:
             raise ValueError("display_unit cannot be None")
         self._display_unit = WeightUnit(value)
+
+    async def _populate_device_metadata(self, client: BleakClient) -> None:
+        """Read device metadata via :func:`_read_device_metadata` and update
+        the cached attributes.
+
+        Conditional assignment: if a read returns ``None`` (transient
+        failure or characteristic absent), the prior cached value is
+        preserved rather than clobbered.
+        """
+        battery, firmware = await _read_device_metadata(client)
+        if battery is not None:
+            self._battery_level = battery
+        if firmware is not None:
+            self._firmware_revision = firmware
 
     async def async_start(self) -> None:
         """Start BLE scanning and begin listening for the target scale."""
@@ -509,6 +610,9 @@ class RenphoESCS20MScale:
             self._initializing = False
 
     async def _start_scale_session(self, ble_device: BLEDevice) -> None:
+        client = self._client
+        if client is None:
+            return
         self._state_mask = 0
         try:
             self._logger.debug(
@@ -516,10 +620,11 @@ class RenphoESCS20MScale:
                 ble_device.name,
                 ble_device.address,
             )
-            if weight_char := self._client.services.get_characteristic(
+            await self._populate_device_metadata(client)
+            if weight_char := client.services.get_characteristic(
                 NOTIFY_CHARACTERISTIC_UUID
             ):
-                await self._client.start_notify(
+                await client.start_notify(
                     weight_char,
                     lambda char, data: self._notification_handler(
                         char, data, ble_device.name, ble_device.address

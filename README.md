@@ -9,9 +9,13 @@ This package provides a basic unofficial interface for interacting with Renpho's
 
 ## Version Status
 
-**v0.1.0** — initial release. Supports the ES-CS20M (QN-series) only.
-Three operating modes are implemented: weight-only, fixed-user (with
-body fat), and async user-detection.
+**v0.1.1**:
+
+- ✅ Initial release + metadata read support.
+- ✅ Three operating modes: weight-only, fixed-user (with body fat), and async
+  user-detection.
+- ✅ Adds cached `battery_level` and `firmware_revision` metadata fields on scale
+  instances.
 
 **Disclaimer: This is an unofficial, community-developed library. It is not affiliated with, officially maintained by, or in any way officially connected with Renpho, its parent companies, subsidiaries, or affiliates. The official Renpho website can be found at https://www.renpho.com. The names "Renpho" and "ES-CS20M", as well as related names, marks, emblems, and images, are registered trademarks of their respective owners.**
 
@@ -189,6 +193,10 @@ the library cancels the resolver task to avoid leaking work.
   - a `Profile` (fixed-user mode),
   - a `ProfileResolver` (user-detection mode),
   - `None` (weight-only mode, default).
+- `battery_level` — last successfully-read battery percentage (`int | None`).
+  May be `None` until first successful read.
+- `firmware_revision` — last successfully-read firmware revision string (`str | None`).
+  May be `None` until first successful read or when response is empty.
 - `ScaleData` — dataclass passed to the notification callback. Fields:
   `name`, `address`, `display_unit`, and `measurements` (a dict keyed
   by the constants in the next section).
