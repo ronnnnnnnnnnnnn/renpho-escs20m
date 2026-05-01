@@ -8,6 +8,9 @@ BIA algorithm via ``(algorithm + (0x0A if athlete else 0)) & 0xFF``.
 
 from __future__ import annotations
 
+import asyncio
+from unittest.mock import AsyncMock, MagicMock
+
 import pytest
 
 from renpho_escs20m.const import (
@@ -17,11 +20,97 @@ from renpho_escs20m.const import (
     WEIGHT_KEY,
 )
 from renpho_escs20m.scale import (
+    CMD_END_MEASUREMENT,
+    _MEASUREMENT_STATUS_STABLE,
+    _MEASUREMENT_STATUS_STABLE_WITH_METRICS,
+    Profile,
     WeightUnit,
+    RenphoESCS20MScale,
     build_unit_update_command,
     build_user_profile_command,
     parse_weight,
 )
+
+
+def _make_scale(profile: Profile | AsyncMock | None = None) -> tuple[RenphoESCS20MScale, MagicMock]:
+    callback = MagicMock()
+    scanner = MagicMock()
+    scale = RenphoESCS20MScale(
+        "00:11:22:33:44:55",
+        callback,
+        WeightUnit.KG,
+        profile=profile,
+        bleak_scanner_backend=scanner,
+    )
+    return scale, callback
+
+
+def _measurement_payload(status: int) -> bytearray:
+    """Build a synthetic measurement frame for resolver/end-command behavior."""
+    payload = bytearray(13)
+    payload[0] = 0x10
+    payload[1] = 0x0e
+    payload[2] = 0xff
+    payload[3] = 0xfe
+    payload[4] = status
+    payload[5:7] = int(74.45 * 100).to_bytes(2, "big")
+    if status == _MEASUREMENT_STATUS_STABLE_WITH_METRICS:
+        payload[7:9] = (500).to_bytes(2, "big")
+        payload[9:11] = (500).to_bytes(2, "big")
+        payload[11:13] = (210).to_bytes(2, "big")
+    return payload
+
+
+@pytest.mark.asyncio
+async def test_handle_measurement_only_resolves_profile_on_stable():
+    scale = RenphoESCS20MScale(
+        "00:11:22:33:44:55",
+        MagicMock(),
+        WeightUnit.KG,
+        profile=AsyncMock(return_value=None),
+        bleak_scanner_backend=MagicMock(),
+    )
+    scale._resolve_and_send_profile = AsyncMock()
+
+    scale._handle_measurement(
+        _measurement_payload(_MEASUREMENT_STATUS_STABLE),
+        "Renpho ES-CS20M",
+        "00:11:22:33:44:55",
+    )
+    await asyncio.sleep(0)
+    scale._resolve_and_send_profile.assert_awaited_once_with(74.45, "00:11:22:33:44:55")
+
+    scale._resolve_and_send_profile.reset_mock()
+    scale._handle_measurement(
+        _measurement_payload(_MEASUREMENT_STATUS_STABLE_WITH_METRICS),
+        "Renpho ES-CS20M",
+        "00:11:22:33:44:55",
+    )
+    await asyncio.sleep(0)
+    scale._resolve_and_send_profile.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_handle_measurement_only_sends_end_measurement_for_stable_with_metrics():
+    scale, callback = _make_scale()
+    scale._safe_write = AsyncMock()
+
+    scale._handle_measurement(
+        _measurement_payload(_MEASUREMENT_STATUS_STABLE),
+        "Renpho ES-CS20M",
+        "00:11:22:33:44:55",
+    )
+    await asyncio.sleep(0)
+    scale._safe_write.assert_not_awaited()
+
+    scale._handle_measurement(
+        _measurement_payload(_MEASUREMENT_STATUS_STABLE_WITH_METRICS),
+        "Renpho ES-CS20M",
+        "00:11:22:33:44:55",
+    )
+    await asyncio.sleep(0)
+    scale._safe_write.assert_awaited_once_with(CMD_END_MEASUREMENT)
+    assert callback.call_count == 1
 
 
 def _cmd_hex(cmd: bytearray) -> str:

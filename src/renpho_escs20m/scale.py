@@ -737,17 +737,6 @@ class RenphoESCS20MScale:
             )
             return
 
-        if status not in (
-            _MEASUREMENT_STATUS_STABLE,
-            _MEASUREMENT_STATUS_STABLE_WITH_METRICS,
-        ):
-            self._logger.debug(
-                "ES-CS20M measurement with unknown status received from %s: %s",
-                address,
-                payload.hex(),
-            )
-            return
-
         self._logger.debug(
             "ES-CS20M stable weight received from %s status=%s",
             address,
@@ -758,18 +747,18 @@ class RenphoESCS20MScale:
         # weight to the resolver and write the returned profile so the
         # scale can run body fat calculation before producing its stable-with-metrics
         # frame.
-        if (
-            self._profile_resolver is not None
-            and not self._state_mask & _STATE_PROFILE_RESOLVING
-        ):
-            self._state_mask |= _STATE_PROFILE_RESOLVING
-            weight_kg = round(int.from_bytes(payload[5:7], "big") / 100, 2)
-            self._resolver_task = asyncio.create_task(
-                self._resolve_and_send_profile(weight_kg, address),
-                name="escs20m-resolve-profile",
-            )
-
-        if status == _MEASUREMENT_STATUS_STABLE_WITH_METRICS:
+        if status == _MEASUREMENT_STATUS_STABLE:
+            if (
+                self._profile_resolver is not None
+                and not self._state_mask & _STATE_PROFILE_RESOLVING
+            ):
+                self._state_mask |= _STATE_PROFILE_RESOLVING
+                weight_kg = round(int.from_bytes(payload[5:7], "big") / 100, 2)
+                self._resolver_task = asyncio.create_task(
+                    self._resolve_and_send_profile(weight_kg, address),
+                    name="escs20m-resolve-profile",
+                )
+        elif status == _MEASUREMENT_STATUS_STABLE_WITH_METRICS:
             self._logger.debug(
                 "ES-CS20M measurement appears final. Scheduling measurement "
                 "end command."
@@ -778,15 +767,20 @@ class RenphoESCS20MScale:
                 self._safe_write(CMD_END_MEASUREMENT),
                 name="escs20m-end-measurement",
             )
+            data = parse_weight(payload)
+            scale_data = ScaleData()
+            scale_data.name = name
+            scale_data.address = address
+            scale_data.display_unit = self.display_unit
+            scale_data.measurements = data
 
-        data = parse_weight(payload)
-        scale_data = ScaleData()
-        scale_data.name = name
-        scale_data.address = address
-        scale_data.display_unit = self.display_unit
-        scale_data.measurements = data
-
-        self._notification_callback(scale_data)
+            self._notification_callback(scale_data)
+        else:
+            self._logger.warning(
+                "ES-CS20M measurement with unknown status received from %s: %s",
+                address,
+                payload.hex(),
+            )
 
     async def _resolve_and_send_profile(
         self, weight_kg: float, address: str

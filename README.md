@@ -9,7 +9,7 @@ This package provides a basic unofficial interface for interacting with Renpho's
 
 ## Version Status
 
-**v0.1.1**:
+**v0.1.2**:
 
 - ✅ Initial release + metadata read support.
 - ✅ Three operating modes: weight-only, fixed-user (with body fat), and async
@@ -193,6 +193,11 @@ the library cancels the resolver task to avoid leaking work.
   - a `Profile` (fixed-user mode),
   - a `ProfileResolver` (user-detection mode),
   - `None` (weight-only mode, default).
+- `callback` passed to `RenphoESCS20MScale`:
+  receives `ScaleData` only when the scale emits a final
+  `stable-with-metrics` frame.
+  In user-detection mode, the earlier `stable` frame is used only to trigger
+  the profile resolver.
 - `battery_level` — last successfully-read battery percentage (`int | None`).
   May be `None` until first successful read.
 - `firmware_revision` — last successfully-read firmware revision string (`str | None`).
