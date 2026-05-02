@@ -9,9 +9,9 @@ This package provides a basic unofficial interface for interacting with Renpho's
 
 ## Version Status
 
-**v0.1.2**:
+**v0.2.0**:
 
-- ✅ Initial release + metadata read support.
+- ✅ Stable BLE measurement protocol with battery + firmware metadata reads on connect.
 - ✅ Three operating modes: weight-only, fixed-user (with body fat), and async
   user-detection.
 - ✅ Adds cached `battery_level` and `firmware_revision` metadata fields on scale
@@ -26,7 +26,7 @@ This package provides a basic unofficial interface for interacting with Renpho's
 - Live weight and body fat readings from the scale's notification stream.
 - Guest-mode protocol — coexists safely with users registered by the official Renpho app on the same scale.
 - Three modes: fixed-user (with `Profile`), user-detection (with async resolver), and weight-only.
-- `BodyMetrics` derives 9 body-composition metrics from a stable reading: BMI, fat-free weight, body water %, skeletal muscle %, muscle mass, bone mass, protein %, BMR, and a body fat % passthrough.
+- `BodyMetrics` derives 9 body-composition metrics from a stable reading: BMI, fat-free mass, body water %, skeletal muscle %, muscle mass, bone mass, protein %, BMR, and a body fat % passthrough.
 - Optional RX/TX payload logging via standard Python `logging`.
 
 ## Installation

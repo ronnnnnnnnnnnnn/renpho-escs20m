@@ -427,8 +427,14 @@ class RenphoESCS20MScale:
         adapter: str | None = None,
         bleak_scanner_backend: BaseBleakScanner | None = None,
         cooldown_seconds: int = 0,
+        max_connect_attempts: int = 2,
         logger: logging.Logger | None = None,
     ) -> None:
+        if max_connect_attempts < 1:
+            raise ValueError(
+                f"max_connect_attempts must be >= 1; got {max_connect_attempts}"
+            )
+
         self._logger = logger or _LOGGER
         self._logger.info("Initializing RenphoESCS20MScale for address: %s", address)
 
@@ -438,6 +444,7 @@ class RenphoESCS20MScale:
         self._notification_callback = notification_callback
         self._cooldown_seconds = cooldown_seconds
         self._cooldown_end_time: float = 0
+        self._max_connect_attempts = max_connect_attempts
         self._display_unit: WeightUnit = WeightUnit(display_unit)
         self._state_mask = 0
         self._battery_level: int | None = None
@@ -592,6 +599,7 @@ class RenphoESCS20MScale:
                     ble_device,
                     self.address,
                     self._unavailable_callback,
+                    max_attempts=self._max_connect_attempts,
                 )
                 self._logger.debug("Connected to scale: %s", self.address)
             except Exception as ex:

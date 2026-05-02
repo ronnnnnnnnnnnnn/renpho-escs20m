@@ -207,12 +207,13 @@ async def test_read_device_metadata_firmware_timeout_does_not_affect_battery(
     assert firmware is None
 
 
-def _make_scale(scanner=None):
+def _make_scale(scanner=None, **kwargs):
     """Build a `RenphoESCS20MScale` with mocked scanner backend.
 
     Bypasses the platform-specific scanner construction so tests run on any
     OS without a Bluetooth adapter. The scanner mock satisfies the
-    ``register_detection_callback`` call in `__init__`.
+    ``register_detection_callback`` call in `__init__`. Additional
+    constructor kwargs can be passed through ``**kwargs``.
     """
     from renpho_escs20m.scale import RenphoESCS20MScale
 
@@ -222,6 +223,7 @@ def _make_scale(scanner=None):
         address="00:11:22:33:44:55",
         notification_callback=lambda data: None,
         bleak_scanner_backend=scanner,
+        **kwargs,
     )
 
 
@@ -287,3 +289,19 @@ async def test_populate_device_metadata_preserves_both_when_both_reads_fail():
     await scale._populate_device_metadata(client)
     assert scale.battery_level == 77
     assert scale.firmware_revision == "9.9.9"
+
+
+def test_max_connect_attempts_defaults_to_2():
+    scale = _make_scale()
+    assert scale._max_connect_attempts == 2
+
+
+def test_max_connect_attempts_custom_value_is_stored():
+    scale = _make_scale(max_connect_attempts=5)
+    assert scale._max_connect_attempts == 5
+
+
+@pytest.mark.parametrize("invalid", [0, -1, -100])
+def test_max_connect_attempts_below_one_raises(invalid):
+    with pytest.raises(ValueError, match="max_connect_attempts"):
+        _make_scale(max_connect_attempts=invalid)

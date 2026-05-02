@@ -2,7 +2,7 @@
 
 The scale computes body fat on-device and publishes it in
 the BLE measurement frame; :class:`BodyMetrics` takes that body fat
-value as input and derives the remaining metrics (BMI, fat-free weight,
+value as input and derives the remaining metrics (BMI, fat-free mass,
 water, skeletal muscle, bone, muscle, protein, BMR) from it.
 """
 
@@ -88,18 +88,17 @@ class BodyMetrics:
         return self.body_fat
 
     @cached_property
-    def fat_free_weight(self) -> float:
+    def fat_free_mass(self) -> float:
         """
-        Calculate Fat-Free Weight (FFW).
+        Calculate Fat-Free Mass (FFM).
 
-        FFW is the difference between total body weight and body fat
-        weight.
+        FFM is the difference between total body mass and fat mass.
 
         Returns:
-            float: The calculated FFW value in kg, clamped to [5, 200].
+            float: The calculated FFM value in kg, clamped to [5, 200].
         """
-        ffw = _round(self.weight * (100.0 - self.body_fat) / 100.0, 2)
-        return max(5.0, min(200.0, ffw))
+        ffm = _round(self.weight * (100.0 - self.body_fat) / 100.0, 2)
+        return max(5.0, min(200.0, ffm))
 
     @cached_property
     def body_water_percentage(self) -> float:
