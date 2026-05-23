@@ -5,19 +5,21 @@
 [![CI](https://github.com/ronnnnnnnnnnnnn/renpho-escs20m/actions/workflows/ci-cd.yml/badge.svg)](https://github.com/ronnnnnnnnnnnnn/renpho-escs20m/actions/workflows/ci-cd.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 
-This package provides a basic unofficial interface for interacting with Renpho's ES-CS20M scale using Bluetooth Low Energy (BLE).
+This package provides an unofficial interface for interacting with
+Renpho's ES-CS20M scale (and other Renpho scales that share the same
+QN-series protocol) over Bluetooth Low Energy. See the [Device
+compatibility](#device-compatibility) section for the current list of
+confirmed-working models.
 
-## Version Status
-
-**v0.2.0**:
-
-- ✅ Stable BLE measurement protocol with battery + firmware metadata reads on connect.
-- ✅ Three operating modes: weight-only, fixed-user (with body fat), and async
-  user-detection.
-- ✅ Adds cached `battery_level` and `firmware_revision` metadata fields on scale
-  instances.
-
-**Disclaimer: This is an unofficial, community-developed library. It is not affiliated with, officially maintained by, or in any way officially connected with Renpho, its parent companies, subsidiaries, or affiliates. The official Renpho website can be found at https://www.renpho.com. The names "Renpho" and "ES-CS20M", as well as related names, marks, emblems, and images, are registered trademarks of their respective owners.**
+> **Disclaimer:** This is an unofficial, community-developed library.
+> It is not affiliated with, endorsed by, or connected to Renpho, its
+> parent companies, subsidiaries, or affiliates. The official Renpho
+> website can be found at <https://www.renpho.com>. "Renpho",
+> "ES-CS20M", and other model names referenced here, along with
+> related marks, emblems, and images, are property of their respective
+> owners. Use of any trade name or trademark is for identification and
+> reference purposes only and does not imply any association with the
+> trademark holder.
 
 [![Buy Me A Coffee](https://www.buymeacoffee.com/assets/img/custom_images/orange_img.png)](https://www.buymeacoffee.com/ronnnnnnn)
 
@@ -38,7 +40,49 @@ pip install renpho-escs20m
 PyPI uses the hyphenated name `renpho-escs20m`; the import name uses
 underscores: `import renpho_escs20m`.
 
-## Quick Start
+## Device compatibility
+
+This library targets a specific **QN-series BLE protocol**, which several
+Renpho scales share — but compatibility doesn't strictly track the marketed
+model name. Some ES-CS20M *hardware revisions* speak a different protocol and
+aren't supported; some other Renpho models happen to share hardware with the
+ES-CS20M and work fine. The reliable discriminator seems to be the
+**HVIN** (Hardware Version Identification Number) printed on the
+regulatory sticker on the back of the scale, including its trailing
+revision code (e.g. `…MA2` vs `…MB2`).
+
+Confirmed-working:
+
+| Marketed model | HVIN        |
+|----------------|-------------|
+| ES-CS20M       | `ESCS20MA2` |
+| ES-32MD        | `ESCS20MA2` |
+| ES-30M         | `ES30MA2`   |
+
+Known-incompatible:
+
+| Marketed model | HVIN        |
+|----------------|-------------|
+| ES-CS20M       | `ESCS20MB2` |
+
+The pattern so far: marketed model name is unreliable, but the HVIN — and specifically its revision suffix (`A2`, `B2`, …) — tracks the actual hardware and apparently also the protocol. If your HVIN ends in `A2`, this library will likely work with it; if it ends in some other suffix, treat as unknown until reported.
+
+### Reporting a compatibility result
+
+If your scale isn't in either table, open an issue at
+[github.com/ronnnnnnnnnnnnn/renpho-escs20m/issues](https://github.com/ronnnnnnnnnnnnn/renpho-escs20m/issues)
+with:
+
+- Marketed model (e.g., ES-CS20M)
+- HVIN from the back-of-device sticker (including the revision suffix)
+- Whether the library actually drives the scale correctly (live weight
+  notifications, body fat values, etc.)
+
+The library itself doesn't gate or warn on compatibility at runtime — it'll
+attempt the handshake against any device. This section is the canonical
+compatibility record.
+
+## Quick start
 
 ### Weight only (no body fat)
 
@@ -75,8 +119,8 @@ from renpho_escs20m import (
 
 PROFILE = Profile(
     sex=Sex.Male,
-    age=43,
-    height_m=1.70,
+    age=35,
+    height_m=1.80,
     athlete=False,
     algorithm=0x04,        # see "Body fat algorithm" below
 )
@@ -179,7 +223,39 @@ the bootstrap profile (no body fat) before your resolved profile
 lands. If the BLE session ends while the resolver is still in flight,
 the library cancels the resolver task to avoid leaking work.
 
-## API Reference
+## API reference
+
+### Scale client
+
+- `RenphoESCS20MScale(address, callback, display_unit, *, profile=None,
+  scanning_mode=BluetoothScanningMode.ACTIVE, …)` — BLE scale client.
+  The `profile` argument is one of:
+  - a `Profile` (fixed-user mode),
+  - a `ProfileResolver` (user-detection mode),
+  - `None` (weight-only mode, default).
+
+  Additional keyword arguments (`adapter`, `cooldown_seconds`,
+  `max_connect_attempts`, `bleak_scanner_backend`, `logger`) are
+  available for advanced use — see the class docstring.
+- `callback` (passed to `RenphoESCS20MScale`) — invoked only on the
+  final `stable-with-metrics` frame the scale emits at the end of a
+  measurement. In user-detection mode, the earlier `stable` frame is
+  used only to trigger the profile resolver and does not reach the
+  callback. Within the frame, `ScaleData.measurements` always contains
+  `WEIGHT_KEY`; `BODY_FAT_KEY` and the two `RESISTANCE_*_KEY` entries
+  are present only when the scale actually produced non-zero values
+  for them — they will be absent in weight-only mode, in user-detection
+  mode if the resolver returned `None`, and any time `algorithm=0x00`.
+- `scale.battery_level` — last successfully-read battery percentage
+  (`int | None`). May be `None` until first successful read.
+- `scale.firmware_revision` — last successfully-read firmware revision
+  string (`str | None`). May be `None` until first successful read or
+  when response is empty.
+- `BluetoothScanningMode` — `ACTIVE` (default) / `PASSIVE`, passed via
+  the `scanning_mode` kwarg. `PASSIVE` only takes effect on Linux
+  (BlueZ); other platforms fall back to active.
+
+### Profiles
 
 - `Profile(sex, age, height_m, athlete=False, algorithm=0x04)` —
   user-profile inputs the scale needs to compute body fat on-device.
@@ -188,37 +264,51 @@ the library cancels the resolver task to avoid leaking work.
   user-detection mode: `Callable[[float], Awaitable[Profile | None]]`.
   Receives the first stable weight in kg and returns the Profile to
   write (or `None` to skip).
-- `RenphoESCS20MScale(address, callback, display_unit, *, profile, …)`
-  — BLE scale client. The `profile` argument is one of:
-  - a `Profile` (fixed-user mode),
-  - a `ProfileResolver` (user-detection mode),
-  - `None` (weight-only mode, default).
-- `callback` passed to `RenphoESCS20MScale`:
-  receives `ScaleData` only when the scale emits a final
-  `stable-with-metrics` frame.
-  In user-detection mode, the earlier `stable` frame is used only to trigger
-  the profile resolver.
-- `battery_level` — last successfully-read battery percentage (`int | None`).
-  May be `None` until first successful read.
-- `firmware_revision` — last successfully-read firmware revision string (`str | None`).
-  May be `None` until first successful read or when response is empty.
+
+### Measurements
+
 - `ScaleData` — dataclass passed to the notification callback. Fields:
   `name`, `address`, `display_unit`, and `measurements` (a dict keyed
-  by the constants in the next section).
-- `BluetoothScanningMode` — `ACTIVE` (default) / `PASSIVE`. Passive
-  scanning uses less power on platforms that support it.
+  by the constants below).
+- `WeightUnit` — `KG`, `LB`, `ST`, `ST_LB`.
+- Measurement-dict keys (constants importable from `renpho_escs20m`):
+  - `WEIGHT_KEY` (`"weight"`) — kg
+  - `BODY_FAT_KEY` (`"body_fat"`) — % (only on stable-with-metrics frames)
+  - `RESISTANCE_1_KEY`, `RESISTANCE_2_KEY` (`"resistance_1"`,
+    `"resistance_2"`) — bioelectrical impedance in ohms (only on
+    stable-with-metrics frames; the two readings are typically within a
+    couple of ohms of each other and either can be fed to
+    `calculate_body_fat()`).
+
+### Body composition
+
 - `BodyMetrics(weight_kg, height_m, age, sex, body_fat_percentage)` —
   derives body-composition metrics from a stable reading. Call it
-  from the notification callback once a Profile is known. No `athlete`
-  parameter: by the time a body fat value reaches this class, the
-  scale's firmware has already applied the athlete adjustment.
+  from the notification callback once a `Profile` is known. No
+  `athlete` parameter: by the time a body fat value reaches this
+  class, the scale's firmware has already applied the athlete
+  adjustment. Exposes these snake_case attributes:
+  - `body_mass_index` — BMI
+  - `body_fat_percentage` — passthrough of the constructor input
+  - `fat_free_mass` (kg)
+  - `body_water_percentage`
+  - `skeletal_muscle_percentage`
+  - `bone_mass` (kg)
+  - `muscle_mass` (kg)
+  - `protein_percentage`
+  - `basal_metabolic_rate` (kcal/day, integer)
 - `calculate_body_fat(weight_kg, height_m, age, sex, resistance, *,
   algorithm=0x04, athlete=False)` — off-scale approximation of the
   on-device body fat formulas (algorithms `0x03` and `0x04` only).
-  Useful for recomputing body fat after the fact when a slow
-  user-detection lookup misses the scale's commit window.
-- `Sex` — `Male` / `Female`.
-- `WeightUnit` — `KG`, `LB`, `ST`, `ST_LB`.
+  Complements `BodyMetrics`: `BodyMetrics` takes an already-computed
+  body fat value as input, while `calculate_body_fat` computes one
+  from raw impedance. The typical pairing is to feed
+  `calculate_body_fat`'s output into `BodyMetrics` when a slow
+  user-detection lookup misses the scale's commit window and body fat
+  needs to be recomputed from `RESISTANCE_1_KEY` after the fact.
+
+### Low-level
+
 - `build_user_profile_command(...)` — raw command builder for the
   guest-mode user-profile frame the scale expects. Most callers should
   construct a `Profile` and let `RenphoESCS20MScale` call this builder;
@@ -248,23 +338,11 @@ and `0x04` via `calculate_body_fat()` — useful when the scale's body
 fat commit window closes before a slow user-detection lookup resolves.
 The other algorithms aren't currently approximated in software.
 
-## Measurement-dict keys (constants)
-
-- `WEIGHT_KEY` (`"weight"`) — kg
-- `BODY_FAT_KEY` (`"body_fat"`) — % (only on stable-with-metrics frames)
-- `RESISTANCE_1_KEY`, `RESISTANCE_2_KEY` (`"resistance_1"`,
-  `"resistance_2"`) — bioelectrical impedance in ohms (only on
-  stable-with-metrics frames; the two readings are typically within a
-  couple of ohms of each other and either can be fed to
-  `calculate_body_fat()`).
-- `BodyMetrics` exposes its own snake_case attributes
-  (`body_mass_index`, `basal_metabolic_rate`, …).
-
 ## App-matching conventions
 
 The Renpho app applies a few non-obvious transformations to profile
-data before running the body fat calculation. This library matches
-some of them automatically and intentionally diverges from one:
+data before running the body fat calculation. The library diverges
+from one and leaves the other to the caller:
 
 1. **Height precision: library passes through; app truncates to whole
    cm.** The Renpho app truncates a `170.7 cm` profile to `170 cm`
@@ -282,7 +360,7 @@ some of them automatically and intentionally diverges from one:
    the `Profile`.
 
 
-## Compatibility
+## Platform compatibility
 
 - Python 3.11+
 - bleak 2.x (`bleak>=2.0.0,<3.0.0`)
@@ -303,9 +381,9 @@ power on
 scan on
 ```
 
-(See https://github.com/home-assistant/core/issues/76186#issuecomment-1204954485)
+(See [home-assistant/core#76186 (comment)](https://github.com/home-assistant/core/issues/76186#issuecomment-1204954485) for context.)
 
-## Support the Project
+## Support the project
 
 If you find this unofficial project helpful, consider buying me a
 coffee! Your support helps maintain and improve this library.
@@ -316,7 +394,3 @@ coffee! Your support helps maintain and improve this library.
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 for details.
-
-## Disclaimer
-
-This is an independent project developed by the community. It is not endorsed by, directly affiliated with, maintained, authorized, or sponsored by Renpho, or any of their affiliates or subsidiaries. All product and company names are the registered trademarks of their original owners. The use of any trade name or trademark is for identification and reference purposes only and does not imply any association with the trademark holder of their product brand.
