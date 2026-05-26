@@ -66,6 +66,7 @@ _STATE_UNIT_SET = 1
 _STATE_MEASUREMENT_INIT = 2
 _STATE_USER_PROFILE = 4
 _STATE_PROFILE_RESOLVING = 8
+_STATE_WEIGHT_ONLY_FINAL = 16
 
 _DEFAULT_ALGORITHM = 0x04
 
@@ -74,6 +75,7 @@ _DEFAULT_ALGORITHM = 0x04
 # no slot is allocated, nothing is stored, and this library coexists
 # safely on the same scale as the official Renpho app.
 _GUEST_USER_ID = 0xFE
+_GUEST_USER_IDS = frozenset({_GUEST_USER_ID, 0xF0})
 _GUEST_PAD_HI = 0xFF
 _GUEST_PAD_LO = 0xEE
 
@@ -676,7 +678,12 @@ class RenphoESCS20MScale:
                 asyncio.create_task(
                     self._safe_write(cmd), name="escs20m-measurement-init"
                 )
-        elif prefix == b"\x21\x05\xff":
+        elif (
+            len(payload) >= 3
+            and payload[0] == 0x21
+            and payload[1] in (0x05, 0x06)
+            and payload[2] == 0xFF
+        ):
             # Profile request from the scale. Respond directly with a
             # guest-mode user-profile command; the scale will not start
             # a measurement without one:
@@ -724,16 +731,17 @@ class RenphoESCS20MScale:
     def _handle_measurement(
         self, payload: bytearray, name: str, address: str
     ) -> None:
-        if payload[3] != _GUEST_USER_ID:
+        if payload[3] not in _GUEST_USER_IDS:
             # The library always drives the scale in guest mode, so the
-            # scale should echo our guest sentinel (0xFE) on every
+            # scale should echo a known guest sentinel on every
             # measurement frame. Anything else means firmware behaviour
             # has shifted under us; warn loudly on every offending frame.
             self._logger.warning(
                 "ES-CS20M frame from %s carries non-guest user_id 0x%02x; "
-                "library expects 0xFE.",
+                "library expects one of %s.",
                 address,
                 payload[3],
+                ", ".join(f"0x{user_id:02x}" for user_id in sorted(_GUEST_USER_IDS)),
             )
 
         status = payload[4]
@@ -766,6 +774,27 @@ class RenphoESCS20MScale:
                     self._resolve_and_send_profile(weight_kg, address),
                     name="escs20m-resolve-profile",
                 )
+            elif (
+                self._fixed_profile is None
+                and self._profile_resolver is None
+                and not self._state_mask & _STATE_WEIGHT_ONLY_FINAL
+            ):
+                self._state_mask |= _STATE_WEIGHT_ONLY_FINAL
+                self._logger.debug(
+                    "ES-CS20M weight-only measurement appears final. "
+                    "Scheduling measurement end command."
+                )
+                asyncio.create_task(
+                    self._safe_write(CMD_END_MEASUREMENT),
+                    name="escs20m-end-measurement",
+                )
+                scale_data = ScaleData()
+                scale_data.name = name
+                scale_data.address = address
+                scale_data.display_unit = self.display_unit
+                scale_data.measurements = parse_weight(payload)
+
+                self._notification_callback(scale_data)
         elif status == _MEASUREMENT_STATUS_STABLE_WITH_METRICS:
             self._logger.debug(
                 "ES-CS20M measurement appears final. Scheduling measurement "
@@ -843,5 +872,4 @@ class RenphoESCS20MScale:
         except Exception as ex:
             self._logger.error("ES-CS20M failed to send command %s: %s", data.hex(), ex)
             self._state_mask = 0
-
 
