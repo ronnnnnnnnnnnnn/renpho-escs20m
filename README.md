@@ -363,7 +363,7 @@ from one and leaves the other to the caller:
 ## Platform compatibility
 
 - Python 3.11+
-- bleak 2.x (`bleak>=2.0.0,<3.0.0`)
+- bleak 2.x or 3.x (`bleak>=2.0.0,<4.0.0`)
 - Tested on macOS (Apple Silicon)
 - Linux via BlueZ should work through the standard bleak backend but is
   unverified
