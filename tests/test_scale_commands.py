@@ -9,6 +9,7 @@ BIA algorithm via ``(algorithm + (0x0A if athlete else 0)) & 0xFF``.
 from __future__ import annotations
 
 import asyncio
+import logging
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -21,6 +22,8 @@ from renpho_escs20m.const import (
 )
 from renpho_escs20m.scale import (
     CMD_END_MEASUREMENT,
+    _BOOTSTRAP_PROFILE,
+    _build_command_for_profile,
     _MEASUREMENT_STATUS_STABLE,
     _MEASUREMENT_STATUS_STABLE_WITH_METRICS,
     Profile,
@@ -45,13 +48,13 @@ def _make_scale(profile: Profile | AsyncMock | None = None) -> tuple[RenphoESCS2
     return scale, callback
 
 
-def _measurement_payload(status: int) -> bytearray:
+def _measurement_payload(status: int, *, user_id: int = 0xfe) -> bytearray:
     """Build a synthetic measurement frame for resolver/end-command behavior."""
     payload = bytearray(13)
     payload[0] = 0x10
     payload[1] = 0x0e
     payload[2] = 0xff
-    payload[3] = 0xfe
+    payload[3] = user_id
     payload[4] = status
     payload[5:7] = int(74.45 * 100).to_bytes(2, "big")
     if status == _MEASUREMENT_STATUS_STABLE_WITH_METRICS:
@@ -91,7 +94,25 @@ async def test_handle_measurement_only_resolves_profile_on_stable():
 
 
 @pytest.mark.asyncio
-async def test_handle_measurement_only_sends_end_measurement_for_stable_with_metrics():
+async def test_profile_request_accepts_elis1_length_byte():
+    scale, _ = _make_scale()
+    scale._safe_write = AsyncMock()
+
+    scale._notification_handler(
+        MagicMock(),
+        bytearray.fromhex("2106ff01648b"),
+        "Renpho Elis 1",
+        "00:11:22:33:44:55",
+    )
+    await asyncio.sleep(0)
+
+    scale._safe_write.assert_awaited_once_with(
+        _build_command_for_profile(_BOOTSTRAP_PROFILE)
+    )
+
+
+@pytest.mark.asyncio
+async def test_weight_only_stable_measurement_is_final_and_ends_session():
     scale, callback = _make_scale()
     scale._safe_write = AsyncMock()
 
@@ -101,7 +122,23 @@ async def test_handle_measurement_only_sends_end_measurement_for_stable_with_met
         "00:11:22:33:44:55",
     )
     await asyncio.sleep(0)
-    scale._safe_write.assert_not_awaited()
+    scale._safe_write.assert_awaited_once_with(CMD_END_MEASUREMENT)
+    assert callback.call_count == 1
+
+    scale._handle_measurement(
+        _measurement_payload(_MEASUREMENT_STATUS_STABLE),
+        "Renpho ES-CS20M",
+        "00:11:22:33:44:55",
+    )
+    await asyncio.sleep(0)
+    scale._safe_write.assert_awaited_once_with(CMD_END_MEASUREMENT)
+    assert callback.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_handle_measurement_only_sends_end_measurement_for_stable_with_metrics():
+    scale, callback = _make_scale()
+    scale._safe_write = AsyncMock()
 
     scale._handle_measurement(
         _measurement_payload(_MEASUREMENT_STATUS_STABLE_WITH_METRICS),
@@ -109,6 +146,24 @@ async def test_handle_measurement_only_sends_end_measurement_for_stable_with_met
         "00:11:22:33:44:55",
     )
     await asyncio.sleep(0)
+    scale._safe_write.assert_awaited_once_with(CMD_END_MEASUREMENT)
+    assert callback.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_handle_measurement_accepts_elis1_guest_user_id(caplog):
+    scale, callback = _make_scale()
+    scale._safe_write = AsyncMock()
+    caplog.set_level(logging.WARNING)
+
+    scale._handle_measurement(
+        _measurement_payload(_MEASUREMENT_STATUS_STABLE_WITH_METRICS, user_id=0xF0),
+        "Renpho Elis 1",
+        "00:11:22:33:44:55",
+    )
+    await asyncio.sleep(0)
+
+    assert "non-guest user_id" not in caplog.text
     scale._safe_write.assert_awaited_once_with(CMD_END_MEASUREMENT)
     assert callback.call_count == 1
 
