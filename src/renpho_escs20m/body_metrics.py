@@ -20,7 +20,7 @@ class Sex(IntEnum):
 
 def _round(x: float, ndigits: int) -> float:
     """Round-half-up (away from zero) to ``ndigits`` decimal places."""
-    scale = 10 ** ndigits
+    scale = 10**ndigits
     return floor(x * scale + 0.5) / scale
 
 
@@ -74,7 +74,7 @@ class BodyMetrics:
         Returns:
             float: The calculated BMI value, rounded to 1 decimal place.
         """
-        return _round(self.weight / (self.height ** 2), 1)
+        return _round(self.weight / (self.height**2), 1)
 
     @cached_property
     def body_fat_percentage(self) -> float:
@@ -145,8 +145,12 @@ class BodyMetrics:
         """
         bf_factor = [-0.94969, -0.93960]
         constant = [94.992, 93.988]
-        soft_lean_pct = _round(constant[self.sex] + bf_factor[self.sex] * self.body_fat, 1)
-        soft_lean_kg = max(3.75, min(110.0, _round(self.weight * soft_lean_pct / 100.0, 2)))
+        soft_lean_pct = _round(
+            constant[self.sex] + bf_factor[self.sex] * self.body_fat, 1
+        )
+        soft_lean_kg = max(
+            3.75, min(110.0, _round(self.weight * soft_lean_pct / 100.0, 2))
+        )
         bf_kg = self.body_fat * self.weight / 100.0
         return max(1.0, min(7.0, _round(self.weight - soft_lean_kg - bf_kg, 2)))
 
@@ -193,33 +197,48 @@ class BodyMetrics:
         """
         bone_factor = [430.9015, 359.6167]
         constant = [372.7023, 370.5818]
-        bmr = int(_round(constant[self.sex] + bone_factor[self.sex] * self.bone_mass, 0))
+        bmr = int(
+            _round(constant[self.sex] + bone_factor[self.sex] * self.bone_mass, 0)
+        )
         return max(900, min(2500, bmr))
-
 
 
 _ALGO_0X04 = {
     # (sex, athlete) -> (c_BMI, c_age, c_int)
-    (Sex.Male,   False): (1.524, 0.103, -21.992),
+    (Sex.Male, False): (1.524, 0.103, -21.992),
     (Sex.Female, False): (1.545, 0.097, -12.689),
-    (Sex.Male,   True):  (0.7678, 0.0292, -6.5417),
-    (Sex.Female, True):  (0.9310, 0.0326, -4.5527),
+    (Sex.Male, True): (0.7678, 0.0292, -6.5417),
+    (Sex.Female, True): (0.9310, 0.0326, -4.5527),
 }
 
 
 _ALGO_0X03_NONATH = {
     # sex -> (c_h2, c_w, c_r, c_age, c_int_m_plus_extra)
-    Sex.Male:   (0.0009, 0.392, -0.00095, -0.0693, 2.877),
+    Sex.Male: (0.0009, 0.392, -0.00095, -0.0693, 2.877),
     Sex.Female: (0.00089, 0.39, -0.001, -0.08, -3.3 + 1.662),
 }
 
 
 _ALGO_0X03_ATH = {
     # (sex, bmi_ge_25) -> (c_BMI², c_BMI, c_age, c_w, c_h, c_int)
-    (Sex.Male,   True):  (-0.0088225, 1.1402243, 0.023917, 0.003917, -0.004927, -7.809911),
-    (Sex.Male,   False): (-0.027341, 2.0040585, 0.0282436, 0.02382, -0.019248, -17.06006),
-    (Sex.Female, True):  (-0.0060424,  0.999226, 0.03461369, 0.0179066, -0.044369, 5.04487),
-    (Sex.Female, False): (-0.02172, 1.62807, 0.045364, 0.0857724, -0.09616912, 2.5939906),
+    (Sex.Male, True): (-0.0088225, 1.1402243, 0.023917, 0.003917, -0.004927, -7.809911),
+    (Sex.Male, False): (-0.027341, 2.0040585, 0.0282436, 0.02382, -0.019248, -17.06006),
+    (Sex.Female, True): (
+        -0.0060424,
+        0.999226,
+        0.03461369,
+        0.0179066,
+        -0.044369,
+        5.04487,
+    ),
+    (Sex.Female, False): (
+        -0.02172,
+        1.62807,
+        0.045364,
+        0.0857724,
+        -0.09616912,
+        2.5939906,
+    ),
 }
 
 
@@ -234,7 +253,7 @@ def calculate_body_fat(
     athlete: bool = False,
 ) -> float:
     """
-    Compute body fat percentage using formulas approximating the on-device calculation, 
+    Compute body fat percentage using formulas approximating the on-device calculation,
     given a known user profile and a stable measurement frame's weight and resistance.
 
     Useful when a user's identity is determined *after* a measurement
@@ -251,7 +270,7 @@ def calculate_body_fat(
         resistance: Bioelectrical impedance reading in ohms (use
             ``resistance_1`` from the BLE frame; ``resistance_2`` is
             usually within a couple of ohms).
-        algorithm: Body fat calculation algorithm selector 
+        algorithm: Body fat calculation algorithm selector
             (currently supported values are 0x03 and 0x04).
         athlete: If True, use the athlete-tuned curve.
 
@@ -270,7 +289,7 @@ def calculate_body_fat(
         raise ValueError("resistance must be positive")
     sex = Sex(sex)
     age = int(age)
-    bmi = weight_kg / (height_m ** 2)
+    bmi = weight_kg / (height_m**2)
     height_cm = height_m * 100
 
     if algorithm == 0x04:
@@ -283,13 +302,24 @@ def calculate_body_fat(
     if algorithm == 0x03:
         if not athlete:
             c_h2, c_w, c_r, c_age, c_int = _ALGO_0X03_NONATH[sex]
-            lbm = (c_h2 * height_cm ** 2 + c_w * weight_kg
-                   + c_r * resistance + c_age * age + c_int)
+            lbm = (
+                c_h2 * height_cm**2
+                + c_w * weight_kg
+                + c_r * resistance
+                + c_age * age
+                + c_int
+            )
             return _round((weight_kg - lbm) / weight_kg * 100, 1)
 
         c_bmi2, c_bmi, c_age, c_w, c_h, c_int = _ALGO_0X03_ATH[(sex, bmi >= 25)]
-        bf = (c_bmi2 * bmi * bmi + c_bmi * bmi + c_age * age
-              + c_w * weight_kg + c_h * height_cm + c_int)
+        bf = (
+            c_bmi2 * bmi * bmi
+            + c_bmi * bmi
+            + c_age * age
+            + c_w * weight_kg
+            + c_h * height_cm
+            + c_int
+        )
         return _round(bf, 1)
 
     raise ValueError(f"unsupported algorithm 0x{algorithm:02x}")
