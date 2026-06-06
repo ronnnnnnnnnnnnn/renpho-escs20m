@@ -56,6 +56,7 @@ Confirmed-working:
 | Marketed model | HVIN        |
 |----------------|-------------|
 | ES-CS20M       | `ESCS20MA2` |
+| ES-CS20M       | `ESCS20MN`  |
 | ES-32MD        | `ESCS20MA2` |
 | ES-30M         | `ES30MA2`   |
 | ES-26M         | `ESCS20MA2` |
@@ -66,7 +67,9 @@ Known-incompatible:
 |----------------|-------------|
 | ES-CS20M       | `ESCS20MB2` |
 
-The pattern so far: marketed model name is unreliable, but the HVIN — and specifically its revision suffix (`A2`, `B2`, …) — tracks the actual hardware and apparently also the protocol. If your HVIN ends in `A2`, this library will likely work with it; if it ends in some other suffix, treat as unknown until reported.
+The pattern so far: marketed model name is unreliable, but the HVIN — and specifically its revision suffix (`A2`, `B2`, `N`…) — tracks the actual hardware and apparently also the protocol. If your Renpho scale HVIN ends in `A2` or `N`, this library will likely work with it; if it ends in some other suffix, try it out to see if it works and report back on the issue tracker.
+
+> This integration may also work with other QN-Scale varieties utilizing the same protocol, including non-Renpho ones. Feel free to report compatibility results on the issue tracker.
 
 ### Reporting a compatibility result
 

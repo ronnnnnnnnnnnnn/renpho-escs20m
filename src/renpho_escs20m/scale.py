@@ -10,7 +10,7 @@ import struct
 import time
 from collections.abc import Awaitable, Callable
 from enum import IntEnum, StrEnum
-from typing import Any
+from typing import Any, NamedTuple
 
 from bleak import BleakClient
 from bleak.assigned_numbers import AdvertisementDataType
@@ -27,7 +27,6 @@ from .body_metrics import Sex
 from .const import (
     BATTERY_LEVEL_CHARACTERISTIC_UUID,
     BODY_FAT_KEY,
-    CMD_END_MEASUREMENT,
     CMD_SET_DISPLAY_UNIT,
     COMMAND_CHARACTERISTIC_UUID,
     FIRMWARE_REVISION_CHARACTERISTIC_UUID,
@@ -35,6 +34,26 @@ from .const import (
     RESISTANCE_1_KEY,
     RESISTANCE_2_KEY,
     WEIGHT_KEY,
+    _BASIC_STATUS_BIA_RUNNING,
+    _BASIC_STATUS_FINAL,
+    _BASIC_STATUS_SETTLING,
+    _DEFAULT_VENDOR_BYTE,
+    _EPOCH_OFFSET,
+    _GUEST_PAD_HI,
+    _GUEST_PAD_LO,
+    _GUEST_USER_ID,
+    _LEN_BASIC_MEASUREMENT,
+    _LEN_EXTENDED_MEASUREMENT,
+    _LEN_EXTENDED_PRE_MEASUREMENT,
+    _MEASUREMENT_STATUS_STABLE,
+    _MEASUREMENT_STATUS_STABLE_WITH_METRICS,
+    _MEASUREMENT_STATUS_UNSTABLE,
+    _OP_MEAS_INIT_REQUEST,
+    _OP_MEASUREMENT,
+    _OP_PRE_MEASUREMENT,
+    _OP_PROFILE_ACK,
+    _OP_UNIT_REQUEST,
+    _USER_PROFILE_TRAILER_TAIL,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -54,30 +73,17 @@ if _IS_LINUX:
     _PASSIVE_SCANNER_ARGS = BlueZScannerArgs(or_patterns=_PASSIVE_OR_PATTERNS)
 
 
-_EPOCH_OFFSET = 946656000
-
 _DEVICE_METADATA_READ_TIMEOUT_SECONDS = 1.0
-
-_MEASUREMENT_STATUS_UNSTABLE = 0
-_MEASUREMENT_STATUS_STABLE = 1
-_MEASUREMENT_STATUS_STABLE_WITH_METRICS = 2
 
 _STATE_UNIT_SET = 1
 _STATE_MEASUREMENT_INIT = 2
 _STATE_USER_PROFILE = 4
 _STATE_PROFILE_RESOLVING = 8
+# Set once the basic-flavor final (status 0x01) measurement frame has been
+# handled, so a repeated final frame does not fire the callback twice.
+_STATE_BASIC_FINAL = 16
 
 _DEFAULT_ALGORITHM = 0x04
-
-# Guest-mode sentinels for bytes 3-5 of the user-profile frame. The
-# scale firmware uses these to recognize the session as ephemeral —
-# no slot is allocated, nothing is stored, and this library coexists
-# safely on the same scale as the official Renpho app.
-_GUEST_USER_ID = 0xFE
-_GUEST_PAD_HI = 0xFF
-_GUEST_PAD_LO = 0xEE
-
-_USER_PROFILE_TRAILER_TAIL = 0x02
 
 
 class BluetoothScanningMode(StrEnum):
@@ -217,7 +223,9 @@ _WEIGHT_UNIT_TO_BYTE: dict[WeightUnit, int] = {
 }
 
 
-def build_unit_update_command(desired_unit: WeightUnit) -> bytearray:
+def build_unit_update_command(
+    desired_unit: WeightUnit, vendor_byte: int = _DEFAULT_VENDOR_BYTE
+) -> bytearray:
     """
     Build the display-unit update command.
 
@@ -231,21 +239,37 @@ def build_unit_update_command(desired_unit: WeightUnit) -> bytearray:
     ``ST_LB``       ``0x08``  (stones + pounds remainder)
     ``ST``          ``0x10``  (stones only)
     ============== =====
+
+    ``vendor_byte`` is the byte at offset 2 the scale uses (renpho uses ``0xFF``); 
+    it is echoed back so the command is accepted by the scale.
     """
     unit_byte = _WEIGHT_UNIT_TO_BYTE.get(WeightUnit(desired_unit), 0x01)
     payload = bytearray(CMD_SET_DISPLAY_UNIT)
+    payload[2] = vendor_byte
     payload[3] = unit_byte
     payload[8] = sum(payload[0:8]) & 0xFF
     return payload
 
 
-def build_measurement_initiation_command() -> bytearray:
-    """Build the initiation command with current timestamp and checksum."""
+def build_measurement_initiation_command(
+    vendor_byte: int = _DEFAULT_VENDOR_BYTE,
+) -> bytearray:
+    """Build the initiation command with current timestamp and checksum.
+
+    ``vendor_byte`` is echoed at offset 2 (see
+    :func:`build_unit_update_command`).
+    """
     cmd = bytearray(8)
-    cmd[0:3] = b"\x20\x08\xff"
+    cmd[0:3] = bytes([0x20, 0x08, vendor_byte])
     ts = int(time.time()) - _EPOCH_OFFSET
     struct.pack_into("<I", cmd, 3, ts)
     cmd[7] = sum(cmd[0:7]) & 0xFF
+    return cmd
+
+
+def build_end_measurement_command(vendor_byte: int = _DEFAULT_VENDOR_BYTE) -> bytearray:
+    cmd = bytearray([0x1F, 0x05, vendor_byte, 0x10])
+    cmd.append(sum(cmd) & 0xFF)
     return cmd
 
 
@@ -304,32 +328,83 @@ def _build_command_for_profile(profile: Profile) -> bytearray:
     )
 
 
-def parse_weight(payload: bytearray) -> dict[str, int | float | None]:
+class _ExtendedFrame(NamedTuple):
+    """Decoded extended-flavor measurement frame fields."""
+
+    weight_kg: float
+    status: int
+    body_fat: float | None
+    resistance_1: int | None
+    resistance_2: int | None
+
+
+def parse_extended_measurement(payload: bytearray) -> _ExtendedFrame:
     """
     Parse a live measurement notification.
 
-    Returns a dict with ``weight`` (kg), and on stable-with-metrics
-    frames also ``body_fat`` (%) and the two impedance readings
-    (``resistance_1``, ``resistance_2``, in ohms). Resistance can be fed
+    Returns a _ExtendedFrame with decoded values. Resistance can be fed
     to :func:`renpho_escs20m.body_metrics.calculate_body_fat` to compute
     body fat retroactively when the user identity is known later than
     the measurement (e.g. after a slow user-detection lookup).
     """
-    data: dict[str, int | float | None] = {}
     status = payload[4]
     weight = int.from_bytes(payload[5:7], "big")
-    data[WEIGHT_KEY] = round(float(weight) / 100, 2)
+    weight_kg = round(float(weight) / 100, 2)
 
-    if status == _MEASUREMENT_STATUS_STABLE_WITH_METRICS and len(payload) >= 13:
-        body_fat = int.from_bytes(payload[11:13], "big")
-        if body_fat:
-            data[BODY_FAT_KEY] = round(float(body_fat) / 10, 1)
-        r1 = int.from_bytes(payload[7:9], "big")
-        r2 = int.from_bytes(payload[9:11], "big")
-        if r1 or r2:
-            data[RESISTANCE_1_KEY] = r1
-            data[RESISTANCE_2_KEY] = r2
-    return data
+    body_fat = None
+    r1 = None
+    r2 = None
+
+    if status == _MEASUREMENT_STATUS_STABLE_WITH_METRICS:
+        bf_raw = int.from_bytes(payload[11:13], "big")
+        if bf_raw:
+            body_fat = round(float(bf_raw) / 10, 1)
+        r1_raw = int.from_bytes(payload[7:9], "big")
+        r2_raw = int.from_bytes(payload[9:11], "big")
+        if r1_raw or r2_raw:
+            r1 = r1_raw
+            r2 = r2_raw
+
+    return _ExtendedFrame(
+        weight_kg=weight_kg,
+        status=status,
+        body_fat=body_fat,
+        resistance_1=r1,
+        resistance_2=r2,
+    )
+
+
+class _BasicFrame(NamedTuple):
+    """Decoded basic-flavor measurement frame fields."""
+
+    weight_kg: float
+    status: int
+    resistance_1: int
+    resistance_2: int
+
+
+def parse_basic_measurement(payload: bytearray) -> _BasicFrame:
+    """Decode a basic-flavor measurement frame (``10 0b``, 11 bytes).
+
+    Layout (no guest-id byte — shifted left vs the 14-byte extended frame)::
+
+        0..2   prefix 10 0b <vendor>
+        3..4   weight, big-endian uint16, 0.01 kg
+        5      status: 0x00 settling, 0x11 stable + BIA running, 0x01 final
+        6..7   resistance 1 (only meaningful on the 0x01 final frame)
+        8..9   resistance 2 (only meaningful on the 0x01 final frame)
+        10     checksum
+
+    The caller validates length (>= 10 bytes) and dispatches on ``status``.
+    Resistance is only meaningful on the final (``0x01``) frame; on
+    settling / BIA-running frames it reads as 0.
+    """
+    return _BasicFrame(
+        weight_kg=round(int.from_bytes(payload[3:5], "big") / 100, 2),
+        status=payload[5],
+        resistance_1=int.from_bytes(payload[6:8], "big"),
+        resistance_2=int.from_bytes(payload[8:10], "big"),
+    )
 
 
 async def _read_device_metadata(
@@ -346,11 +421,10 @@ async def _read_device_metadata(
     applies a short timeout per field so unsupported or slow characteristics do
     not block startup.
     """
+
     async def read_battery() -> int | None:
         try:
-            char = client.services.get_characteristic(
-                BATTERY_LEVEL_CHARACTERISTIC_UUID
-            )
+            char = client.services.get_characteristic(BATTERY_LEVEL_CHARACTERISTIC_UUID)
             if char is not None:
                 data = await asyncio.wait_for(
                     client.read_gatt_char(char),
@@ -360,9 +434,7 @@ async def _read_device_metadata(
                     return None
                 return data[0]
         except Exception:
-            _LOGGER.debug(
-                "ES-CS20M failed to read battery level", exc_info=True
-            )
+            _LOGGER.debug("ES-CS20M failed to read battery level", exc_info=True)
         return None
 
     async def read_firmware() -> str | None:
@@ -377,9 +449,7 @@ async def _read_device_metadata(
                 )
                 return data.decode("utf-8").strip(" \t\n\r\x00") or None
         except Exception:
-            _LOGGER.debug(
-                "ES-CS20M failed to read firmware revision", exc_info=True
-            )
+            _LOGGER.debug("ES-CS20M failed to read firmware revision", exc_info=True)
         return None
 
     battery, firmware = await asyncio.gather(read_battery(), read_firmware())
@@ -471,6 +541,12 @@ class RenphoESCS20MScale:
         # sessions.
         self._resolver_task: asyncio.Task | None = None
 
+        self._bg_tasks: set[asyncio.Task] = set()
+
+        # Per-device frame byte (offset 2), detected per-session from the wire
+        # and echoed back in our replies; defaults to renpho's 0xFF.
+        self._vendor_byte: int = _DEFAULT_VENDOR_BYTE
+
         if bleak_scanner_backend is None:
             scanner_kwargs: dict[str, Any] = {
                 "detection_callback": self._advertisement_callback,
@@ -493,6 +569,11 @@ class RenphoESCS20MScale:
             self._scanner = bleak_scanner_backend
             self._scanner.register_detection_callback(self._advertisement_callback)
         self._lock = asyncio.Lock()
+
+    def _fire_and_forget(self, coro: Awaitable[Any], name: str) -> None:
+        task = asyncio.create_task(coro, name=name)
+        self._bg_tasks.add(task)
+        task.add_done_callback(self._bg_tasks.discard)
 
     @property
     def battery_level(self) -> int | None:
@@ -622,6 +703,7 @@ class RenphoESCS20MScale:
         if client is None:
             return
         self._state_mask = 0
+        self._vendor_byte = _DEFAULT_VENDOR_BYTE
         try:
             self._logger.debug(
                 "ES-CS20M starting session for device %s (%s)",
@@ -649,150 +731,324 @@ class RenphoESCS20MScale:
         self, _: BleakGATTCharacteristic, payload: bytearray, name: str, address: str
     ) -> None:
         self._logger.debug("ES-CS20M RX payload: %s", payload.hex())
-
-        if len(payload) >= 7 and payload[0:3] == b"\x10\x0e\xff":
-            self._handle_measurement(payload, name, address)
+        if len(payload) < 2:
+            self._logger.debug(
+                "ES-CS20M ignoring unrecognized payload: %s", payload.hex()
+            )
             return
+        opcode, length = payload[0], payload[1]
 
-        prefix = bytes(payload[0:3])
+        # Byte 2 seems to be a per-device value.
+        # Capture it from frames that carry it so our replies echo it back.
+        # (The profile command/ack frames use 0x02 there instead, so they're
+        # excluded from capture.)
+        if (
+            opcode
+            in (
+                _OP_MEASUREMENT,
+                _OP_UNIT_REQUEST,
+                _OP_MEAS_INIT_REQUEST,
+                _OP_PRE_MEASUREMENT,
+            )
+            and len(payload) >= 3
+        ):
+            vendor = payload[2]
+            if vendor != _DEFAULT_VENDOR_BYTE and vendor != self._vendor_byte:
+                # Surface non-renpho scales once per session; replies echo the
+                # scale's own byte, but support for them is best-effort.
+                self._logger.info(
+                    "ES-CS20M %s reports vendor byte 0x%02x (renpho is 0x%02x); "
+                    "replies will echo it — non-renpho QN-Scale support is "
+                    "best-effort.",
+                    address,
+                    vendor,
+                    _DEFAULT_VENDOR_BYTE,
+                )
+            self._vendor_byte = vendor
 
-        if prefix == b"\x12\x12\xff":
-            if not self._state_mask & _STATE_UNIT_SET:
-                self._state_mask |= _STATE_UNIT_SET
-                self._logger.debug(
-                    "ES-CS20M unit negotiation frame received from %s. Scheduling update.",
-                    address,
-                )
-                cmd = build_unit_update_command(self.display_unit)
-                asyncio.create_task(self._safe_write(cmd), name="escs20m-unit-update")
-        elif prefix == b"\x14\x0b\xff":
-            if not self._state_mask & _STATE_MEASUREMENT_INIT:
-                self._state_mask |= _STATE_MEASUREMENT_INIT
-                self._logger.debug(
-                    "ES-CS20M measurement initiation requested by %s. Sending timestamp.",
-                    address,
-                )
-                cmd = build_measurement_initiation_command()
-                asyncio.create_task(
-                    self._safe_write(cmd), name="escs20m-measurement-init"
-                )
-        elif prefix == b"\x21\x05\xff":
-            # Profile request from the scale. Respond directly with a
-            # guest-mode user-profile command; the scale will not start
-            # a measurement without one:
-            #   - fixed-Profile mode: send the caller's Profile;
-            #   - user-detection mode: send the bootstrap Profile
-            #     (algorithm=0x00, no body fat calculation) so the measurement starts;
-            #     when the first stable weight arrives the resolver
-            #     fires and overrides this with the resolved Profile;
-            #   - weight-only mode: send the bootstrap Profile and
-            #     leave the scale running with body fat calculation disabled.
-            if not self._state_mask & _STATE_USER_PROFILE:
-                self._state_mask |= _STATE_USER_PROFILE
-                if self._fixed_profile is not None:
-                    profile_to_send = self._fixed_profile
-                    log_what = "fixed profile"
-                elif self._profile_resolver is not None:
-                    profile_to_send = _BOOTSTRAP_PROFILE
-                    log_what = (
-                        "bootstrap profile (algorithm=0x00); resolved profile "
-                        "will follow on first stable weight (detection mode)"
-                    )
-                else:
-                    profile_to_send = _BOOTSTRAP_PROFILE
-                    log_what = (
-                        "bootstrap profile (algorithm=0x00; weight-only mode — "
-                        "scale will not produce body fat)"
-                    )
-                self._logger.debug(
-                    "ES-CS20M profile requested by %s. Sending %s.",
-                    address,
-                    log_what,
-                )
-                cmd = _build_command_for_profile(profile_to_send)
-                asyncio.create_task(
-                    self._safe_write(cmd), name="escs20m-user-profile"
-                )
-        elif prefix == b"\xa1\x06\x02":
-            # Scale ack of the user-profile command. Nothing more to
-            # send — the scale will start broadcasting measurement
-            # frames once the user steps on it.
+        # Dispatch by opcode (byte 0); byte 1 (length) selects the flavor on
+        # the measurement and pre-measurement frames. The extended flavor
+        # (HVIN ESCS20MA2) computes body fat on-device from a guest profile;
+        # the basic flavor (HVIN ESCS20MN) streams weight + raw impedance only.
+        if opcode == _OP_UNIT_REQUEST:
+            self._handle_unit_request(address)
+        elif opcode == _OP_MEAS_INIT_REQUEST:
+            self._handle_meas_init_request(address)
+        elif opcode == _OP_PRE_MEASUREMENT:
+            # Only renpho's extended scale takes a profile over BLE, and the
+            # profile sub-protocol is renpho-specific — so gate it on the
+            # renpho vendor byte. A non-renpho scale that happens to send the
+            # same length (e.g. 21 05 with a different vendor byte) is treated
+            # as basic: no profile reply, it streams measurements on its own.
+            if (
+                length == _LEN_EXTENDED_PRE_MEASUREMENT
+                and self._vendor_byte == _DEFAULT_VENDOR_BYTE
+            ):
+                self._handle_extended_pre_measurement(address)
+            else:
+                self._handle_basic_pre_measurement(address)
+        elif opcode == _OP_MEASUREMENT and length == _LEN_EXTENDED_MEASUREMENT:
+            self._handle_extended_measurement(payload, name, address)
+        elif opcode == _OP_MEASUREMENT and length == _LEN_BASIC_MEASUREMENT:
+            self._handle_basic_measurement(payload, name, address)
+        elif opcode == _OP_PROFILE_ACK:
+            # Extended-flavor ack of our user-profile command; nothing to send.
             self._logger.debug("ES-CS20M user profile acknowledged by %s", address)
         else:
-            self._logger.debug("ES-CS20M ignoring unrecognized payload: %s", payload.hex())
+            self._logger.debug(
+                "ES-CS20M ignoring unrecognized payload: %s", payload.hex()
+            )
 
-    def _handle_measurement(
+    def _handle_unit_request(self, address: str) -> None:
+        """Reply to the scale's display-unit request (shared across variants)."""
+        if self._state_mask & _STATE_UNIT_SET:
+            return
+        self._state_mask |= _STATE_UNIT_SET
+        self._logger.debug(
+            "ES-CS20M unit negotiation requested by %s. Sending set-unit reply.",
+            address,
+        )
+        self._fire_and_forget(
+            self._safe_write(
+                build_unit_update_command(self.display_unit, self._vendor_byte)
+            ),
+            name="escs20m-unit-update",
+        )
+
+    def _handle_meas_init_request(self, address: str) -> None:
+        """Reply to the scale's measurement-init request (shared across variants)."""
+        if self._state_mask & _STATE_MEASUREMENT_INIT:
+            return
+        self._state_mask |= _STATE_MEASUREMENT_INIT
+        self._logger.debug(
+            "ES-CS20M measurement initiation requested by %s. Sending timestamp.",
+            address,
+        )
+        self._fire_and_forget(
+            self._safe_write(build_measurement_initiation_command(self._vendor_byte)),
+            name="escs20m-measurement-init",
+        )
+
+    def _handle_extended_pre_measurement(self, address: str) -> None:
+        """Reply to the extended-flavor pre-measurement frame — a profile request.
+
+        The scale will not start a measurement without a profile reply:
+          - fixed-Profile mode: send the caller's Profile;
+          - user-detection mode: send the bootstrap Profile (algorithm=0x00,
+            no body fat) so the measurement starts; the resolver fires on
+            the first stable weight and overrides it;
+          - weight-only mode: send the bootstrap Profile and leave body fat
+            calculation disabled.
+        """
+        if self._state_mask & _STATE_USER_PROFILE:
+            return
+        self._state_mask |= _STATE_USER_PROFILE
+        if self._fixed_profile is not None:
+            profile_to_send = self._fixed_profile
+            log_what = "fixed profile"
+        elif self._profile_resolver is not None:
+            profile_to_send = _BOOTSTRAP_PROFILE
+            log_what = (
+                "bootstrap profile (algorithm=0x00); resolved profile will "
+                "follow on first stable weight (detection mode)"
+            )
+        else:
+            profile_to_send = _BOOTSTRAP_PROFILE
+            log_what = (
+                "bootstrap profile (algorithm=0x00; weight-only mode — scale "
+                "will not produce body fat)"
+            )
+        self._logger.debug(
+            "ES-CS20M profile requested by %s. Sending %s.", address, log_what
+        )
+        self._fire_and_forget(
+            self._safe_write(_build_command_for_profile(profile_to_send)),
+            name="escs20m-user-profile",
+        )
+
+    def _handle_basic_pre_measurement(self, address: str) -> None:
+        """Acknowledge the basic-flavor pre-measurement frame — a no-op.
+
+        This variant takes no profile over BLE and needs no reply; the scale
+        begins streaming measurements on its own. Recognized here only so it
+        isn't logged as an unrecognized payload. Body fat is computed
+        off-scale from ``resistance_1`` + the caller's profile.
+        """
+        if self._state_mask & _STATE_USER_PROFILE:
+            return
+        self._state_mask |= _STATE_USER_PROFILE
+        self._logger.debug(
+            "QN basic-flavor pre-measurement frame from %s; this variant takes no profile "
+            "over BLE (scale streams on its own). Body fat is computed "
+            "off-scale from resistance.",
+            address,
+        )
+
+    def _handle_extended_measurement(
         self, payload: bytearray, name: str, address: str
     ) -> None:
+        """Handle an extended-flavor measurement broadcast (``10 0e``, 14 bytes)."""
+        if len(payload) < _LEN_EXTENDED_MEASUREMENT:
+            self._logger.debug(
+                "ES-CS20M measurement frame from %s too short (%d bytes): %s",
+                address,
+                len(payload),
+                payload.hex(),
+            )
+            return
         if payload[3] != _GUEST_USER_ID:
-            # The library always drives the scale in guest mode, so the
-            # scale should echo our guest sentinel (0xFE) on every
-            # measurement frame. Anything else means firmware behaviour
-            # has shifted under us; warn loudly on every offending frame.
+            # The library always drives the scale in guest mode, so the scale
+            # should echo our guest sentinel (0xFE) on every measurement
+            # frame. Anything else means firmware behaviour has shifted under
+            # us; warn loudly on every offending frame.
             self._logger.warning(
                 "ES-CS20M frame from %s carries non-guest user_id 0x%02x; "
                 "library expects 0xFE.",
                 address,
                 payload[3],
             )
+        frame = parse_extended_measurement(payload)
 
-        status = payload[4]
-
-        if status == _MEASUREMENT_STATUS_UNSTABLE:
+        if frame.status == _MEASUREMENT_STATUS_UNSTABLE:
             self._logger.debug(
-                "ES-CS20M unstable measurement received from %s",
-                address,
+                "ES-CS20M unstable measurement received from %s", address
             )
             return
 
         self._logger.debug(
-            "ES-CS20M stable weight received from %s status=%s",
-            address,
-            status,
+            "ES-CS20M stable weight received from %s status=%s", address, frame.status
         )
 
-        # Detection-mode trigger: on the first stable frame, hand the
-        # weight to the resolver and write the returned profile so the
-        # scale can run body fat calculation before producing its stable-with-metrics
-        # frame.
-        if status == _MEASUREMENT_STATUS_STABLE:
+        # Detection-mode trigger: on the first stable frame, hand the weight
+        # to the resolver so the scale can run body fat calculation before
+        # the stable-with-metrics frame.
+        if frame.status == _MEASUREMENT_STATUS_STABLE:
             if (
                 self._profile_resolver is not None
                 and not self._state_mask & _STATE_PROFILE_RESOLVING
             ):
                 self._state_mask |= _STATE_PROFILE_RESOLVING
-                weight_kg = round(int.from_bytes(payload[5:7], "big") / 100, 2)
                 self._resolver_task = asyncio.create_task(
-                    self._resolve_and_send_profile(weight_kg, address),
+                    self._resolve_and_send_profile(frame.weight_kg, address),
                     name="escs20m-resolve-profile",
                 )
-        elif status == _MEASUREMENT_STATUS_STABLE_WITH_METRICS:
+        elif frame.status == _MEASUREMENT_STATUS_STABLE_WITH_METRICS:
             self._logger.debug(
                 "ES-CS20M measurement appears final. Scheduling measurement "
                 "end command."
             )
-            asyncio.create_task(
-                self._safe_write(CMD_END_MEASUREMENT),
+            self._fire_and_forget(
+                self._safe_write(build_end_measurement_command(self._vendor_byte)),
                 name="escs20m-end-measurement",
             )
-            data = parse_weight(payload)
-            scale_data = ScaleData()
-            scale_data.name = name
-            scale_data.address = address
-            scale_data.display_unit = self.display_unit
-            scale_data.measurements = data
 
-            self._notification_callback(scale_data)
+            metrics: dict[str, int | float | None] = {WEIGHT_KEY: frame.weight_kg}
+            if frame.body_fat is not None:
+                metrics[BODY_FAT_KEY] = frame.body_fat
+            if frame.resistance_1 is not None:
+                metrics[RESISTANCE_1_KEY] = frame.resistance_1
+                metrics[RESISTANCE_2_KEY] = frame.resistance_2
+
+            self._notification_callback(
+                ScaleData(
+                    name=name,
+                    address=address,
+                    display_unit=self.display_unit,
+                    measurements=metrics,
+                )
+            )
         else:
             self._logger.warning(
                 "ES-CS20M measurement with unknown status received from %s: %s",
                 address,
+                frame.status,
+            )
+
+    def _handle_basic_measurement(
+        self, payload: bytearray, name: str, address: str
+    ) -> None:
+        """Handle a basic-flavor measurement broadcast (``10 0b``, 11 bytes)."""
+        if len(payload) < _LEN_BASIC_MEASUREMENT:
+            self._logger.warning(
+                "QN basic-flavor measurement frame from %s too short (%d bytes): %s",
+                address,
+                len(payload),
+                payload.hex(),
+            )
+            return
+
+        frame = parse_basic_measurement(payload)
+
+        if frame.status == _BASIC_STATUS_SETTLING:
+            self._logger.debug(
+                "QN basic-flavor settling frame from %s: weight=%.2f kg",
+                address,
+                frame.weight_kg,
+            )
+            return
+        if frame.status == _BASIC_STATUS_BIA_RUNNING:
+            self._logger.debug(
+                "QN basic-flavor stable frame from %s, BIA running: weight=%.2f kg",
+                address,
+                frame.weight_kg,
+            )
+            return
+        if frame.status != _BASIC_STATUS_FINAL:
+            self._logger.warning(
+                "QN basic-flavor measurement frame from %s has unexpected status "
+                "0x%02x (expected 0x00/0x11/0x01); ignoring: %s",
+                address,
+                frame.status,
+                payload.hex(),
+            )
+            return
+
+        # Final frame. Guard against a repeated 0x01 frame firing twice.
+        if self._state_mask & _STATE_BASIC_FINAL:
+            self._logger.debug(
+                "QN basic-flavor duplicate final frame from %s; already handled, "
+                "ignoring: %s",
+                address,
+                payload.hex(),
+            )
+            return
+        self._state_mask |= _STATE_BASIC_FINAL
+
+        if not (frame.resistance_1 or frame.resistance_2):
+            self._logger.warning(
+                "QN basic-flavor final frame from %s (status 0x01) carries zero "
+                "impedance; BIA result may be missing: %s",
+                address,
                 payload.hex(),
             )
 
-    async def _resolve_and_send_profile(
-        self, weight_kg: float, address: str
-    ) -> None:
+        self._logger.debug(
+            "QN basic-flavor final measurement from %s: weight=%.2f kg, r1=%d, "
+            "r2=%d. Firing callback and sending end-measurement.",
+            address,
+            frame.weight_kg,
+            frame.resistance_1,
+            frame.resistance_2,
+        )
+        self._fire_and_forget(
+            self._safe_write(build_end_measurement_command(self._vendor_byte)),
+            name="escs20mn-end-measurement",
+        )
+
+        data: dict[str, str | float | None] = {WEIGHT_KEY: frame.weight_kg}
+        if frame.resistance_1 or frame.resistance_2:
+            data[RESISTANCE_1_KEY] = frame.resistance_1
+            data[RESISTANCE_2_KEY] = frame.resistance_2
+        self._notification_callback(
+            ScaleData(
+                name=name,
+                address=address,
+                display_unit=self.display_unit,
+                measurements=data,
+            )
+        )
+
+    async def _resolve_and_send_profile(self, weight_kg: float, address: str) -> None:
         try:
             profile = await self._profile_resolver(weight_kg)
         except asyncio.CancelledError:
@@ -801,12 +1057,11 @@ class RenphoESCS20MScale:
                 address,
             )
             raise
-        except Exception as ex:
+        except Exception:
             self._logger.exception(
-                "ES-CS20M profile resolver raised for %s at weight=%s: %s",
+                "ES-CS20M profile resolver raised for %s at weight=%s",
                 address,
                 weight_kg,
-                ex,
             )
             return
         if profile is None:
@@ -835,13 +1090,13 @@ class RenphoESCS20MScale:
                 COMMAND_CHARACTERISTIC_UUID
             )
         ):
-            self._logger.warning("ES-CS20M command characteristic not found, skipping write")
+            self._logger.warning(
+                "ES-CS20M command characteristic not found, skipping write"
+            )
             return
         try:
             await self._client.write_gatt_char(command_char, data)
             self._logger.debug("ES-CS20M TX payload: %s", data.hex())
-        except Exception as ex:
-            self._logger.error("ES-CS20M failed to send command %s: %s", data.hex(), ex)
+        except Exception:
+            self._logger.exception("ES-CS20M failed to send command %s", data.hex())
             self._state_mask = 0
-
-

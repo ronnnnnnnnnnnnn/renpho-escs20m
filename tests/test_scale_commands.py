@@ -9,18 +9,18 @@ BIA algorithm via ``(algorithm + (0x0A if athlete else 0)) & 0xFF``.
 from __future__ import annotations
 
 import asyncio
+import logging
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from renpho_escs20m.const import (
-    BODY_FAT_KEY,
+    CMD_END_MEASUREMENT,
     RESISTANCE_1_KEY,
     RESISTANCE_2_KEY,
     WEIGHT_KEY,
 )
 from renpho_escs20m.scale import (
-    CMD_END_MEASUREMENT,
     _MEASUREMENT_STATUS_STABLE,
     _MEASUREMENT_STATUS_STABLE_WITH_METRICS,
     Profile,
@@ -28,11 +28,14 @@ from renpho_escs20m.scale import (
     RenphoESCS20MScale,
     build_unit_update_command,
     build_user_profile_command,
-    parse_weight,
+    parse_basic_measurement,
+    parse_extended_measurement,
 )
 
 
-def _make_scale(profile: Profile | AsyncMock | None = None) -> tuple[RenphoESCS20MScale, MagicMock]:
+def _make_scale(
+    profile: Profile | AsyncMock | None = None,
+) -> tuple[RenphoESCS20MScale, MagicMock]:
     callback = MagicMock()
     scanner = MagicMock()
     scale = RenphoESCS20MScale(
@@ -47,17 +50,18 @@ def _make_scale(profile: Profile | AsyncMock | None = None) -> tuple[RenphoESCS2
 
 def _measurement_payload(status: int) -> bytearray:
     """Build a synthetic measurement frame for resolver/end-command behavior."""
-    payload = bytearray(13)
+    payload = bytearray(14)
     payload[0] = 0x10
-    payload[1] = 0x0e
-    payload[2] = 0xff
-    payload[3] = 0xfe
+    payload[1] = 0x0E
+    payload[2] = 0xFF
+    payload[3] = 0xFE
     payload[4] = status
     payload[5:7] = int(74.45 * 100).to_bytes(2, "big")
     if status == _MEASUREMENT_STATUS_STABLE_WITH_METRICS:
         payload[7:9] = (500).to_bytes(2, "big")
         payload[9:11] = (500).to_bytes(2, "big")
         payload[11:13] = (210).to_bytes(2, "big")
+    payload[13] = sum(payload[0:13]) & 0xFF
     return payload
 
 
@@ -72,7 +76,7 @@ async def test_handle_measurement_only_resolves_profile_on_stable():
     )
     scale._resolve_and_send_profile = AsyncMock()
 
-    scale._handle_measurement(
+    scale._handle_extended_measurement(
         _measurement_payload(_MEASUREMENT_STATUS_STABLE),
         "Renpho ES-CS20M",
         "00:11:22:33:44:55",
@@ -81,7 +85,7 @@ async def test_handle_measurement_only_resolves_profile_on_stable():
     scale._resolve_and_send_profile.assert_awaited_once_with(74.45, "00:11:22:33:44:55")
 
     scale._resolve_and_send_profile.reset_mock()
-    scale._handle_measurement(
+    scale._handle_extended_measurement(
         _measurement_payload(_MEASUREMENT_STATUS_STABLE_WITH_METRICS),
         "Renpho ES-CS20M",
         "00:11:22:33:44:55",
@@ -95,7 +99,7 @@ async def test_handle_measurement_only_sends_end_measurement_for_stable_with_met
     scale, callback = _make_scale()
     scale._safe_write = AsyncMock()
 
-    scale._handle_measurement(
+    scale._handle_extended_measurement(
         _measurement_payload(_MEASUREMENT_STATUS_STABLE),
         "Renpho ES-CS20M",
         "00:11:22:33:44:55",
@@ -103,7 +107,7 @@ async def test_handle_measurement_only_sends_end_measurement_for_stable_with_met
     await asyncio.sleep(0)
     scale._safe_write.assert_not_awaited()
 
-    scale._handle_measurement(
+    scale._handle_extended_measurement(
         _measurement_payload(_MEASUREMENT_STATUS_STABLE_WITH_METRICS),
         "Renpho ES-CS20M",
         "00:11:22:33:44:55",
@@ -136,9 +140,7 @@ def test_user_profile_command_athlete_adds_0x0a():
     non_athlete = build_user_profile_command(
         sex=0, age=43, height_m=1.70, athlete=False
     )
-    athlete = build_user_profile_command(
-        sex=0, age=43, height_m=1.70, athlete=True
-    )
+    athlete = build_user_profile_command(sex=0, age=43, height_m=1.70, athlete=True)
     # Default algorithm 0x04 → 0x04 / 0x0E
     assert non_athlete[10] == 0x04
     assert athlete[10] == 0x0E
@@ -176,9 +178,7 @@ def test_user_profile_command_athlete_adds_0x0a():
         (0x06, True, 0x10),
     ],
 )
-def test_user_profile_command_algorithm_to_flag_byte(
-    algorithm, athlete, expected_byte
-):
+def test_user_profile_command_algorithm_to_flag_byte(algorithm, athlete, expected_byte):
     """Byte 10 = (algorithm + (0x0A if athlete else 0)) & 0xFF."""
     cmd = build_user_profile_command(
         sex=0, age=43, height_m=1.70, athlete=athlete, algorithm=algorithm
@@ -240,30 +240,32 @@ def test_unit_update_command_maps_each_weight_unit(unit, expected_byte):
     assert cmd[8] == sum(cmd[0:8]) & 0xFF
 
 
-def test_parse_weight_unstable_frame_returns_only_weight():
+def test_parse_extended_measurement_unstable_frame_returns_only_weight():
     """status=0 frame: weight only, no body_fat/resistance fields."""
     # Real unstable frame: 100eff fe 00 1d47 0000 0000 0000 chk
     payload = bytearray.fromhex("100efffe001d4700000000000020")
-    out = parse_weight(payload)
-    assert out[WEIGHT_KEY] == 74.95
-    assert BODY_FAT_KEY not in out
-    assert RESISTANCE_1_KEY not in out
-    assert RESISTANCE_2_KEY not in out
+    out = parse_extended_measurement(payload)
+    assert out.weight_kg == 74.95
+    assert out.status == 0
+    assert out.body_fat is None
+    assert out.resistance_1 is None
+    assert out.resistance_2 is None
 
 
-def test_parse_weight_stable_with_metrics_surfaces_resistance():
+def test_parse_extended_measurement_stable_with_metrics_surfaces_resistance():
     """status=2 frame: resistance_1 and resistance_2 are exposed."""
     # Real frame from validation: M user, weight 74.95 kg, r1=505, r2=503,
     # bf 21.0% (algorithm 0x04 non-athlete).
     payload = bytearray.fromhex("100efffe021d4701f901f700d245")
-    out = parse_weight(payload)
-    assert out[WEIGHT_KEY] == 74.95
-    assert out[BODY_FAT_KEY] == 21.0
-    assert out[RESISTANCE_1_KEY] == 505
-    assert out[RESISTANCE_2_KEY] == 503
+    out = parse_extended_measurement(payload)
+    assert out.weight_kg == 74.95
+    assert out.status == 2
+    assert out.body_fat == 21.0
+    assert out.resistance_1 == 505
+    assert out.resistance_2 == 503
 
 
-def test_parse_weight_status_2_with_zero_bf_skips_body_fat():
+def test_parse_extended_measurement_status_2_with_zero_bf_skips_body_fat():
     """A status-2 frame with body_fat=0 means BIA was disabled (algorithm
     0x00 bootstrap profile); no body_fat key, but resistance still
     surfaces if non-zero."""
@@ -271,8 +273,195 @@ def test_parse_weight_status_2_with_zero_bf_skips_body_fat():
     # bytes: 10 0e ff fe 02 1d 4c 01 f4 01 f4 00 00 chk
     body = bytearray.fromhex("100efffe021d4c01f401f40000")
     body.append(sum(body) & 0xFF)
-    out = parse_weight(body)
-    assert out[WEIGHT_KEY] == 75.00
-    assert BODY_FAT_KEY not in out
-    assert out[RESISTANCE_1_KEY] == 500
-    assert out[RESISTANCE_2_KEY] == 500
+    out = parse_extended_measurement(body)
+    assert out.weight_kg == 75.00
+    assert out.status == 2
+    assert out.body_fat is None
+    assert out.resistance_1 == 500
+    assert out.resistance_2 == 500
+
+
+# --- ESCS20MN variant -----------------------------------------------------
+# Frames below are real, captured from ESCS20MN hardware.
+
+
+def test_parse_basic_measurement_decodes_final_frame():
+    """Final frame (status 0x01): weight 55.05 kg, r1=508, r2=500."""
+    frame = parse_basic_measurement(bytearray.fromhex("100bff15810101fc01f4a3"))
+    assert frame.weight_kg == 55.05
+    assert frame.status == 0x01
+    assert frame.resistance_1 == 508
+    assert frame.resistance_2 == 500
+
+
+def test_parse_basic_measurement_settling_has_no_impedance():
+    """Settling frame (status 0x00): weight only, impedance reads as 0."""
+    frame = parse_basic_measurement(bytearray.fromhex("100bff1522000000000051"))
+    assert frame.weight_kg == 54.10
+    assert frame.status == 0x00
+    assert frame.resistance_1 == 0
+    assert frame.resistance_2 == 0
+
+
+def _mn_scale() -> tuple[RenphoESCS20MScale, MagicMock]:
+    scale, callback = _make_scale()
+    scale._safe_write = AsyncMock()
+    return scale, callback
+
+
+@pytest.mark.asyncio
+async def test_escs20mn_final_frame_fires_callback_and_ends():
+    scale, callback = _mn_scale()
+    scale._handle_basic_measurement(
+        bytearray.fromhex("100bff15810101fc01f4a3"),
+        "QN-Scale",
+        "ff:03:00:67:0a:23",
+    )
+    await asyncio.sleep(0)
+    assert callback.call_count == 1
+    assert callback.call_args[0][0].measurements == {
+        WEIGHT_KEY: 55.05,
+        RESISTANCE_1_KEY: 508,
+        RESISTANCE_2_KEY: 500,
+    }
+    scale._safe_write.assert_awaited_once_with(CMD_END_MEASUREMENT)
+
+
+@pytest.mark.asyncio
+async def test_escs20mn_settling_and_bia_frames_do_not_fire():
+    scale, callback = _mn_scale()
+    for hx in ("100bff1522000000000051", "100bff15811100000000c1"):
+        scale._handle_basic_measurement(bytearray.fromhex(hx), "QN-Scale", "addr")
+        await asyncio.sleep(0)
+    callback.assert_not_called()
+    scale._safe_write.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_escs20mn_duplicate_final_frame_fires_once():
+    scale, callback = _mn_scale()
+    frame = bytearray.fromhex("100bff15810101fc01f4a3")
+    scale._handle_basic_measurement(frame, "QN-Scale", "addr")
+    scale._handle_basic_measurement(frame, "QN-Scale", "addr")
+    await asyncio.sleep(0)
+    assert callback.call_count == 1
+    scale._safe_write.assert_awaited_once_with(CMD_END_MEASUREMENT)
+
+
+@pytest.mark.asyncio
+async def test_escs20mn_unexpected_status_is_ignored():
+    scale, callback = _mn_scale()
+    # status 0xAB is not one of the known 0x00 / 0x11 / 0x01 values.
+    scale._handle_basic_measurement(
+        bytearray.fromhex("100bff1581ab01fc01f400"), "QN-Scale", "addr"
+    )
+    await asyncio.sleep(0)
+    callback.assert_not_called()
+    scale._safe_write.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_escs20mn_profile_request_sends_nothing():
+    """The MN variant takes no profile over BLE; the request is a no-op."""
+    scale, _ = _mn_scale()
+    scale._handle_basic_pre_measurement("addr")
+    await asyncio.sleep(0)
+    scale._safe_write.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_notification_handler_replies_to_escs20mn_unit_request():
+    scale, _ = _mn_scale()
+    scale._notification_handler(
+        MagicMock(),
+        bytearray.fromhex("1211ff230a670003ff03030500000507cf"),
+        "QN-Scale",
+        "ff:03:00:67:0a:23",
+    )
+    await asyncio.sleep(0)
+    scale._safe_write.assert_awaited_once()
+    assert scale._safe_write.await_args[0][0].hex().startswith("1309ff")
+
+
+@pytest.mark.asyncio
+async def test_notification_handler_replies_to_base_unit_request():
+    scale, _ = _mn_scale()
+    scale._notification_handler(
+        MagicMock(),
+        bytearray.fromhex("1212ff0100"),
+        "Renpho ES-CS20M",
+        "addr",
+    )
+    await asyncio.sleep(0)
+    scale._safe_write.assert_awaited_once()
+    assert scale._safe_write.await_args[0][0].hex().startswith("1309ff")
+
+
+@pytest.mark.asyncio
+async def test_other_brand_vendor_byte_is_detected_and_echoed(caplog):
+    """A non-renpho QN-Scale with vendor byte 0x15 (not renpho's 0xFF): the
+    byte is detected from the wire and echoed back in our replies, and the
+    non-renpho byte is surfaced once."""
+    caplog.set_level(logging.INFO, logger="renpho_escs20m.scale")
+    scale, callback = _mn_scale()
+
+    # Unit request from a non-renpho scale: opcode 0x12, vendor byte 0x15.
+    scale._notification_handler(
+        MagicMock(), bytearray.fromhex("120f15" + "00" * 12), "QN-Scale", "addr"
+    )
+    await asyncio.sleep(0)
+    assert scale._vendor_byte == 0x15
+    set_unit = scale._safe_write.await_args[0][0]
+    assert set_unit[2] == 0x15
+    assert set_unit.hex().startswith("130915")
+
+    scale._safe_write.reset_mock()
+
+    # Basic-flavor final measurement with vendor byte 0x15:
+    # weight 55.05 kg, r1=508, r2=500.
+    scale._notification_handler(
+        MagicMock(), bytearray.fromhex("100b1515810101fc01f4b9"), "QN-Scale", "addr"
+    )
+    await asyncio.sleep(0)
+    assert callback.call_count == 1
+    assert callback.call_args[0][0].measurements == {
+        WEIGHT_KEY: 55.05,
+        RESISTANCE_1_KEY: 508,
+        RESISTANCE_2_KEY: 500,
+    }
+    # End-measurement echoes the scale's vendor byte (0x15), not renpho's 0xFF.
+    assert scale._safe_write.await_args[0][0].hex() == "1f05151049"
+
+    # The non-renpho byte is surfaced exactly once, not re-logged per frame.
+    vendor_logs = [r for r in caplog.records if "vendor byte" in r.getMessage()]
+    assert len(vendor_logs) == 1
+
+
+@pytest.mark.asyncio
+async def test_pre_measurement_len5_sends_profile_for_renpho():
+    """Renpho's extended pre-measurement (21 05 ff) still gets a guest profile."""
+    scale, _ = _mn_scale()
+    scale._notification_handler(
+        MagicMock(), bytearray.fromhex("2105ff0025"), "Renpho ES-CS20M", "addr"
+    )
+    await asyncio.sleep(0)
+    scale._safe_write.assert_awaited_once()
+    assert scale._safe_write.await_args[0][0].hex().startswith("a00d02")
+
+
+@pytest.mark.asyncio
+async def test_pre_measurement_len5_skips_profile_for_non_renpho():
+    """A non-renpho scale's 21 05 (vendor 0x15) is treated as basic — the
+    renpho-specific guest profile is NOT sent."""
+    scale, _ = _mn_scale()
+    # Unit request first, so the 0x15 vendor byte is captured.
+    scale._notification_handler(
+        MagicMock(), bytearray.fromhex("120f15" + "00" * 12), "QN-Scale1", "addr"
+    )
+    # Pre-measurement with length 0x05 but a non-renpho vendor byte.
+    scale._notification_handler(
+        MagicMock(), bytearray.fromhex("210515013c"), "QN-Scale1", "addr"
+    )
+    await asyncio.sleep(0)
+    sent = [c.args[0].hex() for c in scale._safe_write.call_args_list]
+    assert not any(h.startswith("a00d02") for h in sent), sent

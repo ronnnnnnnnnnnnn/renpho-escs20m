@@ -166,7 +166,9 @@ async def test_read_device_metadata_battery_timeout_does_not_affect_firmware(
     )
     client = _make_client()
     battery_char = client.services.get_characteristic(BATTERY_LEVEL_CHARACTERISTIC_UUID)
-    firmware_char = client.services.get_characteristic(FIRMWARE_REVISION_CHARACTERISTIC_UUID)
+    firmware_char = client.services.get_characteristic(
+        FIRMWARE_REVISION_CHARACTERISTIC_UUID
+    )
 
     async def read(char):
         if char is battery_char:
@@ -191,7 +193,9 @@ async def test_read_device_metadata_firmware_timeout_does_not_affect_battery(
     )
     client = _make_client()
     battery_char = client.services.get_characteristic(BATTERY_LEVEL_CHARACTERISTIC_UUID)
-    firmware_char = client.services.get_characteristic(FIRMWARE_REVISION_CHARACTERISTIC_UUID)
+    firmware_char = client.services.get_characteristic(
+        FIRMWARE_REVISION_CHARACTERISTIC_UUID
+    )
 
     async def read(char):
         if char is battery_char:
@@ -257,7 +261,7 @@ async def test_populate_device_metadata_preserves_battery_when_read_fails():
         firmware_data=bytearray(b"1.0.1"),
     )
     await scale._populate_device_metadata(client)
-    assert scale.battery_level == 88           # preserved
+    assert scale.battery_level == 88  # preserved
     assert scale.firmware_revision == "1.0.1"  # updated
 
 
@@ -272,7 +276,7 @@ async def test_populate_device_metadata_preserves_firmware_when_read_fails():
         firmware_raises=RuntimeError("transient"),
     )
     await scale._populate_device_metadata(client)
-    assert scale.battery_level == 0x4b         # updated
+    assert scale.battery_level == 0x4B  # updated
     assert scale.firmware_revision == "1.0.0"  # preserved
 
 
