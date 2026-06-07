@@ -49,23 +49,29 @@ aren't supported; some other Renpho models happen to share hardware with the
 ES-CS20M and work fine. The reliable discriminator seems to be the
 **HVIN** (Hardware Version Identification Number) printed on the
 regulatory sticker on the back of the scale, including its trailing
-revision code (e.g. `…MA2` vs `…MB2`).
+revision code (e.g. `…MA2` vs `…MB2` vs `…MN`). Some stickers don't
+print HVIN as a separate field — in that case the same identifier is
+embedded as the trailing portion of the **FCC ID** (e.g. FCC ID
+`2A26P-ESCS20M` → device code `ESCS20M`). The FCC ID column below
+lets you match on either.
 
 Confirmed-working:
 
-| Marketed model | HVIN        |
-|----------------|-------------|
-| ES-CS20M       | `ESCS20MA2` |
-| ES-CS20M       | `ESCS20MN`  |
-| ES-32MD        | `ESCS20MA2` |
-| ES-30M         | `ES30MA2`   |
-| ES-26M         | `ESCS20MA2` |
+| Marketed model | HVIN        | FCC ID              |
+|----------------|-------------|---------------------|
+| ES-CS20M       | `ESCS20MA2` | `2A26P-ESCS20MA2`   |
+| ES-CS20M       | `ESCS20MN`  | `2A26P-ESCS20MN`    |
+| ES-CS20M       | -           | `2A26P-ESCS20M`     |
+| ES-26M         | `ESCS20MA2` | `2A26P-ESCS20MA2`   |
+| ES-30M         | `ES30MA2`   | `2A26P-ES30MA2`     |
+| ES-32MD        | `ESCS20MA2` | `2A26P-ESCS20MA2`   |
+
 
 Known-incompatible:
 
-| Marketed model | HVIN        |
-|----------------|-------------|
-| ES-CS20M       | `ESCS20MB2` |
+| Marketed model | HVIN        | FCC ID              |
+|----------------|-------------|---------------------|
+| ES-CS20M       | `ESCS20MB2` | `2A26P-ESCS20MB2`   |
 
 The pattern so far: marketed model name is unreliable, but the HVIN — and specifically its revision suffix (`A2`, `B2`, `N`…) — tracks the actual hardware and apparently also the protocol. If your Renpho scale HVIN ends in `A2` or `N`, this library will likely work with it; if it ends in some other suffix, try it out to see if it works and report back on the issue tracker.
 
