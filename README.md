@@ -55,23 +55,32 @@ embedded as the trailing portion of the **FCC ID** (e.g. FCC ID
 `2A26P-ESCS20M` → device code `ESCS20M`). The FCC ID column below
 lets you match on either.
 
+Some stickers don't print the HVIN as a separate field; in that case the
+same code is often embedded in the trailing portion of the **FCC ID** (e.g.
+`2A26P-ESCS20MA2`). The tables below list both.
+
 Confirmed-working:
 
-| Marketed model | HVIN        | FCC ID              |
-|----------------|-------------|---------------------|
-| ES-CS20M       | `ESCS20MA2` | `2A26P-ESCS20MA2`   |
-| ES-CS20M       | `ESCS20MN`  | `2A26P-ESCS20MN`    |
-| ES-CS20M       | -           | `2A26P-ESCS20M`     |
-| ES-26M         | `ESCS20MA2` | `2A26P-ESCS20MA2`   |
-| ES-30M         | `ES30MA2`   | `2A26P-ES30MA2`     |
-| ES-32MD        | `ESCS20MA2` | `2A26P-ESCS20MA2`   |
-
+| Marketed model | HVIN        | FCC ID            |
+|----------------|-------------|-------------------|
+| ES-CS20M       | `ESCS20MA2` | `2A26P-ESCS20MA2` |
+| ES-CS20M       | `ESCS20MN`  | `2A26P-ESCS20MN`  |
+| ES-CS20M       | —           | `2A26P-ESCS20M`   |
+| ES-26M         | `ESCS20MA2` | `2A26P-ESCS20MA2` |
+| ES-30M         | `ES30MA2`   | `2A26P-ES30MA2`   |
+| ES-32MD        | `ESCS20MA2` | `2A26P-ESCS20MA2` |
 
 Known-incompatible:
 
-| Marketed model | HVIN        | FCC ID              |
-|----------------|-------------|---------------------|
-| ES-CS20M       | `ESCS20MB2` | `2A26P-ESCS20MB2`   |
+| Marketed model | HVIN        | FCC ID            | Protocol (first payload bytes) |
+|----------------|-------------|-------------------|--------------------------------|
+| ES-CS20M       | `ESCS20MB2` | `2A26P-ESCS20MB2` | `0x55aa`                       |
+| ES-CS20M       | —           | `2APXUES-CS20M`   | `0xaabb`                       |
+| ES-26BB        | `ES26BBB`   | ?                 | `0x55aa`                       |
+
+The **Protocol** column records the first bytes of the notification frames
+each unsupported variant emits — a rough fingerprint of the (different) BLE
+protocol it speaks, kept for reference and possible future support work.
 
 The pattern so far: marketed model name is unreliable, but the HVIN — and specifically its revision suffix (`A2`, `B2`, `N`…) — tracks the actual hardware and apparently also the protocol. If your Renpho scale HVIN ends in `A2` or `N`, this library will likely work with it; if it ends in some other suffix, try it out to see if it works and report back on the issue tracker.
 
@@ -257,7 +266,14 @@ the library cancels the resolver task to avoid leaking work.
   for them — they will be absent in weight-only mode, in user-detection
   mode if the resolver returned `None`, and any time `algorithm=0x00`.
 - `scale.battery_level` — last successfully-read battery percentage
-  (`int | None`). May be `None` until first successful read.
+  (`int | None`). May be `None` until first successful read. **Reliability
+  caveat:** on at least one observed unit (firmware `V10.0`) the scale
+  reported a static `100` and didn't appear to decrement it as the batteries
+  drained — reading 100% even on cells weak enough to need replacing — and
+  exposed no other battery source over BLE. It's unknown whether other
+  hardware revisions or firmware behave the same way, so treat a steady 100%
+  as *possibly* unreliable rather than assuming it; the value is reported
+  as-is and may be accurate on your device.
 - `scale.firmware_revision` — last successfully-read firmware revision
   string (`str | None`). May be `None` until first successful read or
   when response is empty.

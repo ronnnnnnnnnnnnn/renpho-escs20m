@@ -584,6 +584,15 @@ class RenphoESCS20MScale:
         or rejected, so a misbehaving firmware can surface here for the
         consumer to handle — don't assume the value is always within range.
 
+        Possible reliability caveat: on at least one observed unit (Qing Niu
+        firmware ``V10.0``) the scale reported a static ``100`` and did not
+        appear to decrement it as the cells drained — it was still reading
+        100% on batteries weak enough to need replacing. That unit also
+        exposed no other battery source over BLE. Whether this holds across
+        other hardware revisions or firmware versions is unknown, so treat a
+        steady 100% as *possibly* unreliable rather than assuming it on every
+        device — the value is reported as-is and may well be accurate on yours.
+
         ``None`` until the first successful read on the first connection.
         Persists across disconnects: a transient read failure does not
         clobber a previously-cached value.
