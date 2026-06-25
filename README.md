@@ -76,7 +76,7 @@ Known-incompatible:
 |----------------|-------------|-------------------|--------------------------------|
 | ES-CS20M       | `ESCS20MB2` | `2A26P-ESCS20MB2` | `0x55aa`                       |
 | ES-CS20M       | —           | `2APXUES-CS20M`   | `0xaabb`                       |
-| ES-26BB        | `ES26BBB`   | ?                 | `0x55aa`                       |
+| ES-26BB-B      | `ES26BBB`   | ?                 | `0x55aa`                       |
 
 The **Protocol** column records the first bytes of the notification frames
 each unsupported variant emits — a rough fingerprint of the (different) BLE
