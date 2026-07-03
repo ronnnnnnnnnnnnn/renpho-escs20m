@@ -7,7 +7,9 @@
 
 This package provides an unofficial interface for interacting with
 Renpho's ES-CS20M scale (and other Renpho scales that share the same
-QN-series protocol) over Bluetooth Low Energy. See the [Device
+QN-series protocol) over Bluetooth Low Energy. It also has
+experimental, weight-only support for a broadcast-only ES-CS20M
+subvariant that speaks a different protocol. See the [Device
 compatibility](#device-compatibility) section for the current list of
 confirmed-working models.
 
@@ -30,6 +32,7 @@ confirmed-working models.
 - Three modes: fixed-user (with `Profile`), user-detection (with async resolver), and weight-only.
 - `BodyMetrics` derives 9 body-composition metrics from a stable reading: BMI, fat-free mass, body water %, skeletal muscle %, muscle mass, bone mass, protein %, BMR, and a body fat % passthrough.
 - Optional RX/TX payload logging via standard Python `logging`.
+- **Experimental:** weight-only support for the broadcast-only ES-CS20M subvariant via `RenphoAABBScale` (no body composition — see [Device compatibility](#device-compatibility)).
 
 ## Installation
 
@@ -42,11 +45,23 @@ underscores: `import renpho_escs20m`.
 
 ## Device compatibility
 
-This library targets a specific **QN-series BLE protocol**, which several
-Renpho scales share — but compatibility doesn't strictly track the marketed
-model name. Some ES-CS20M *hardware revisions* speak a different protocol and
-aren't supported; some other Renpho models happen to share hardware with the
-ES-CS20M and work fine. The reliable discriminator seems to be the
+The library speaks up to three Renpho BLE protocols; what a scale supports
+depends on which one its hardware uses:
+
+### Protocol support at a glance
+
+| Protocol   | Transport | Status          | Features |
+|------------|-----------|-----------------|----------|
+| QN-series  | GATT      | ✅ Supported     | Weight, impedance, body-composition metrics, display-unit control |
+| `0xaabb`   | Broadcast | 🔬 Experimental  | Weight only (display unit observed, not settable) |
+| `0x55aa`   | GATT      | ❌ Not yet       | — |
+
+### Identifying your scale
+
+Which protocol a scale speaks doesn't track the marketed model name: several
+Renpho models share the QN-series hardware, while some ES-CS20M *hardware
+revisions* speak a different (broadcast-only or not-yet-supported) protocol.
+The reliable discriminator is the
 **HVIN** (Hardware Version Identification Number) printed on the
 regulatory sticker on the back of the scale, including its trailing
 revision code (e.g. `…MA2` vs `…MB2` vs `…MN`). Some stickers don't
@@ -59,7 +74,7 @@ Some stickers don't print the HVIN as a separate field; in that case the
 same code is often embedded in the trailing portion of the **FCC ID** (e.g.
 `2A26P-ESCS20MA2`). The tables below list both.
 
-Confirmed-working:
+Confirmed-working (QN-series):
 
 | Marketed model | HVIN        | FCC ID            |
 |----------------|-------------|-------------------|
@@ -70,12 +85,28 @@ Confirmed-working:
 | ES-30M         | `ES30MA2`   | `2A26P-ES30MA2`   |
 | ES-32MD        | `ESCS20MA2` | `2A26P-ESCS20MA2` |
 
-Known-incompatible:
+Experimental — broadcast subvariant (weight only):
+
+One ES-CS20M subvariant (FCC ID `2APXUES-CS20M`) is **non-connectable** — it
+broadcasts weight in its BLE advertisements rather than over a GATT
+connection, using a different (`0xaabb`) protocol. The library has
+**experimental, weight-only** support for it via `RenphoAABBScale`:
+
+| Marketed model | HVIN | FCC ID            | Protocol             |
+|----------------|------|-------------------|----------------------|
+| ES-CS20M       | —    | `2APXUES-CS20M`   | `0xaabb` (broadcast) |
+
+Caveats: **weight only** — this scale performs no impedance/BIA (the official
+app derives body composition from the profile alone), so `BodyMetrics` does
+not apply. It reports the unit shown on its display but cannot be told to
+change it. Support has been validated against captured advertisements, not
+yet against live hardware.
+
+Known-incompatible — `0x55aa` (not yet supported):
 
 | Marketed model | HVIN        | FCC ID            | Protocol (first payload bytes) |
 |----------------|-------------|-------------------|--------------------------------|
 | ES-CS20M       | `ESCS20MB2` | `2A26P-ESCS20MB2` | `0x55aa`                       |
-| ES-CS20M       | —           | `2APXUES-CS20M`   | `0xaabb`                       |
 | ES-26BB-B      | `ES26BBB`   | ?                 | `0x55aa`                       |
 
 The **Protocol** column records the first bytes of the notification frames
@@ -107,7 +138,7 @@ compatibility record.
 
 ```python
 import asyncio
-from renpho_escs20m import RenphoESCS20MScale, ScaleData, WEIGHT_KEY, WeightUnit
+from renpho_escs20m import RenphoQNScale, ScaleData, WEIGHT_KEY, WeightUnit
 
 
 def notification_callback(data: ScaleData):
@@ -115,7 +146,7 @@ def notification_callback(data: ScaleData):
 
 
 async def main():
-    scale = RenphoESCS20MScale(
+    scale = RenphoQNScale(
         'XX:XX:XX:XX:XX:XX', notification_callback, WeightUnit.KG,
     )
     await scale.async_start()
@@ -131,7 +162,7 @@ asyncio.run(main())
 ```python
 import asyncio
 from renpho_escs20m import (
-    BODY_FAT_KEY, BodyMetrics, Profile, RenphoESCS20MScale,
+    BODY_FAT_KEY, BodyMetrics, Profile, RenphoQNScale,
     ScaleData, Sex, WEIGHT_KEY, WeightUnit,
 )
 
@@ -165,7 +196,7 @@ def notification_callback(data: ScaleData):
 
 
 async def main():
-    scale = RenphoESCS20MScale(
+    scale = RenphoQNScale(
         'XX:XX:XX:XX:XX:XX',
         notification_callback,
         WeightUnit.KG,
@@ -184,7 +215,7 @@ asyncio.run(main())
 ```python
 import asyncio
 from renpho_escs20m import (
-    Profile, RenphoESCS20MScale, ScaleData, Sex, WEIGHT_KEY, WeightUnit,
+    Profile, RenphoQNScale, ScaleData, Sex, WEIGHT_KEY, WeightUnit,
 )
 
 
@@ -211,7 +242,7 @@ def notification_callback(data: ScaleData):
 
 
 async def main():
-    scale = RenphoESCS20MScale(
+    scale = RenphoQNScale(
         'XX:XX:XX:XX:XX:XX',
         notification_callback,
         WeightUnit.KG,
@@ -242,11 +273,38 @@ the bootstrap profile (no body fat) before your resolved profile
 lands. If the BLE session ends while the resolver is still in flight,
 the library cancels the resolver task to avoid leaking work.
 
+### Broadcast variant (weight only)
+
+The broadcast-only `0xaabb` subvariant uses a different client,
+`RenphoAABBScale` — no `Profile`, no unit control, weight only:
+
+```python
+import asyncio
+from renpho_escs20m import RenphoAABBScale, ScaleData, WEIGHT_KEY
+
+
+def notification_callback(data: ScaleData):
+    print(
+        f"weight={data.measurements[WEIGHT_KEY]} kg  "
+        f"(scale display shows {data.display_unit.name})"
+    )
+
+
+async def main():
+    scale = RenphoAABBScale('XX:XX:XX:XX:XX:XX', notification_callback)
+    await scale.async_start()
+    await asyncio.sleep(30)
+    await scale.async_stop()
+
+
+asyncio.run(main())
+```
+
 ## API reference
 
 ### Scale client
 
-- `RenphoESCS20MScale(address, callback, display_unit, *, profile=None,
+- `RenphoQNScale(address, callback, display_unit, *, profile=None,
   scanning_mode=BluetoothScanningMode.ACTIVE, …)` — BLE scale client.
   The `profile` argument is one of:
   - a `Profile` (fixed-user mode),
@@ -256,7 +314,9 @@ the library cancels the resolver task to avoid leaking work.
   Additional keyword arguments (`adapter`, `cooldown_seconds`,
   `max_connect_attempts`, `bleak_scanner_backend`, `logger`) are
   available for advanced use — see the class docstring.
-- `callback` (passed to `RenphoESCS20MScale`) — invoked only on the
+  `RenphoESCS20MScale` remains importable as a backward-compatible alias
+  for `RenphoQNScale`.
+- `callback` (passed to `RenphoQNScale`) — invoked only on the
   final `stable-with-metrics` frame the scale emits at the end of a
   measurement. In user-detection mode, the earlier `stable` frame is
   used only to trigger the profile resolver and does not reach the
@@ -280,6 +340,30 @@ the library cancels the resolver task to avoid leaking work.
 - `BluetoothScanningMode` — `ACTIVE` (default) / `PASSIVE`, passed via
   the `scanning_mode` kwarg. `PASSIVE` only takes effect on Linux
   (BlueZ); other platforms fall back to active.
+
+### Broadcast variant (experimental)
+
+- `RenphoAABBScale(address, callback, *, scanning_mode=…, adapter=…,
+  bleak_scanner_backend=…, logger=…)` — client for the non-connectable
+  `0xaabb` ES-CS20M subvariant. It never opens a GATT connection; it reads
+  weight straight from the scale's BLE advertisements. Differences from
+  `RenphoQNScale`:
+  - `ScaleData.measurements` contains only `WEIGHT_KEY` (always kg).
+  - `ScaleData.display_unit` reflects the unit the scale's LCD is showing
+    (observed from the advertisement). It is read-only — the scale cannot be
+    told to change units, and assigning `display_unit` is ignored.
+  - No `profile`, no body composition (this scale does no impedance/BIA), and
+    no `battery_level` / `firmware_revision`.
+  - Weight-only, and validated against captured advertisements rather than
+    live hardware.
+
+### Extending the library
+
+- `RenphoScale` / `GattScale` / `AdvertisementScale` — the abstract base
+  classes the concrete clients subclass (`RenphoScale` holds the scanner
+  lifecycle; `GattScale` and `AdvertisementScale` are the connection-based
+  and advertisement-based transports). Exported for adding new protocol
+  variants.
 
 ### Profiles
 
@@ -337,7 +421,7 @@ the library cancels the resolver task to avoid leaking work.
 
 - `build_user_profile_command(...)` — raw command builder for the
   guest-mode user-profile frame the scale expects. Most callers should
-  construct a `Profile` and let `RenphoESCS20MScale` call this builder;
+  construct a `Profile` and let `RenphoQNScale` call this builder;
   use it directly only if you need to bypass the protocol state machine.
 
 ## Body fat algorithm (`Profile.algorithm`)

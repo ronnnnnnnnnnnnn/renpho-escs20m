@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- `RenphoAABBScale` — experimental, weight-only support for the
+  broadcast-only (`0xaabb`) ES-CS20M subvariant (FCC ID `2APXUES-CS20M`).
+  This scale is non-connectable: weight is read from its BLE advertisements.
+  No body composition (it performs no impedance/BIA), and its display unit is
+  observed-only (cannot be set).
+- Exported the transport base classes `RenphoScale`, `GattScale`, and
+  `AdvertisementScale` for adding further protocol variants.
+
+### Changed
+
+- Restructured the library to host multiple protocols: shared base classes in
+  `scale.py`, with the QN-series (`RenphoQNScale`) and broadcast
+  (`RenphoAABBScale`) protocols in the `qn/` and `xaabb/` subpackages.
+  `body_metrics` moved into `qn/`. **The public API is unchanged** — every
+  previous top-level import still works.
+- Renamed `RenphoESCS20MScale` to `RenphoQNScale`, naming the protocol it
+  drives rather than the marketed model (the ES-CS20M ships in several
+  variants that speak different protocols). `RenphoESCS20MScale` remains a
+  backward-compatible alias.
+
 ## [0.2.0] - 2026-05-02
 
 ### Added

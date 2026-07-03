@@ -1,5 +1,5 @@
 """Golden regression tests for
-:func:`renpho_escs20m.body_metrics.calculate_body_fat`.
+:func:`renpho_escs20m.qn.body_metrics.calculate_body_fat`.
 
 Each parameter set is a real stable-with-metrics BLE frame captured
 from live Renpho ES-CS20M scales — same scale, three demographic
@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import pytest
 
-from renpho_escs20m.body_metrics import Sex, calculate_body_fat
+from renpho_escs20m import Sex, calculate_body_fat
 
 
 # (label, sex, age, height_m, algorithm, athlete, weight_kg, r1, bf_expected)

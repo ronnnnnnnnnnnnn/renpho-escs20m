@@ -219,7 +219,7 @@ def _make_scale(scanner=None, **kwargs):
     ``register_detection_callback`` call in `__init__`. Additional
     constructor kwargs can be passed through ``**kwargs``.
     """
-    from renpho_escs20m.scale import RenphoESCS20MScale
+    from renpho_escs20m import RenphoESCS20MScale
 
     if scanner is None:
         scanner = MagicMock(name="scanner")

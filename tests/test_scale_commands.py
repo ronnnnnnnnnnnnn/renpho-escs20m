@@ -1,4 +1,4 @@
-"""Tests for the raw command builders in :mod:`renpho_escs20m.scale`.
+"""Tests for the raw command builders in :mod:`renpho_escs20m.qn.protocol`.
 
 The library always drives the scale in guest mode, so
 :func:`build_user_profile_command` emits ``0xa00d 02`` with the guest
@@ -14,18 +14,18 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from renpho_escs20m import RenphoESCS20MScale
 from renpho_escs20m.const import (
     CMD_END_MEASUREMENT,
     RESISTANCE_1_KEY,
     RESISTANCE_2_KEY,
     WEIGHT_KEY,
-)
-from renpho_escs20m.scale import (
     _MEASUREMENT_STATUS_STABLE,
     _MEASUREMENT_STATUS_STABLE_WITH_METRICS,
+)
+from renpho_escs20m.data import WeightUnit
+from renpho_escs20m.qn.protocol import (
     Profile,
-    WeightUnit,
-    RenphoESCS20MScale,
     build_unit_update_command,
     build_user_profile_command,
     parse_basic_measurement,

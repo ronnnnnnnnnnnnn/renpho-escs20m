@@ -1,4 +1,4 @@
-"""Golden regression tests for :mod:`renpho_escs20m.body_metrics`.
+"""Golden regression tests for :mod:`renpho_escs20m.qn.body_metrics`.
 
 Each parameter set is a real stable-with-metrics BLE frame captured
 from live Renpho ES-CS20M scales. The golden metric values match the
@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import pytest
 
-from renpho_escs20m.body_metrics import BodyMetrics, Sex
+from renpho_escs20m import BodyMetrics, Sex
 
 
 # Profile fields: (label, sex, athlete, height_m, age, frame_hex).
@@ -364,7 +364,7 @@ def test_cached_property_single_evaluation():
 #
 #   python -c "
 #   from tests.test_body_metrics import _VALIDATION_READINGS, _decode_frame
-#   from renpho_escs20m.body_metrics import BodyMetrics
+#   from renpho_escs20m import BodyMetrics
 #   for label, sex, _athlete, h, age, frame in _VALIDATION_READINGS:
 #       w, bf = _decode_frame(frame)
 #       m = BodyMetrics(w, h, age, sex, bf)
