@@ -17,9 +17,16 @@ from ..const import (
     RESISTANCE_1_KEY,
     RESISTANCE_2_KEY,
     WEIGHT_KEY,
+)
+from ..data import BluetoothScanningMode, ScaleData, WeightUnit
+from ..scale import GattScale
+from .protocol import (
+    Profile,
+    ProfileResolver,
     _BASIC_STATUS_BIA_RUNNING,
     _BASIC_STATUS_FINAL,
     _BASIC_STATUS_SETTLING,
+    _BOOTSTRAP_PROFILE,
     _DEFAULT_VENDOR_BYTE,
     _GUEST_USER_ID,
     _LEN_BASIC_MEASUREMENT,
@@ -33,13 +40,6 @@ from ..const import (
     _OP_PRE_MEASUREMENT,
     _OP_PROFILE_ACK,
     _OP_UNIT_REQUEST,
-)
-from ..data import BluetoothScanningMode, ScaleData, WeightUnit
-from ..scale import GattScale
-from .protocol import (
-    Profile,
-    ProfileResolver,
-    _BOOTSTRAP_PROFILE,
     _build_command_for_profile,
     build_end_measurement_command,
     build_measurement_initiation_command,
@@ -62,7 +62,7 @@ class RenphoQNScale(GattScale):
     Renpho ES-CS20M BLE scale.
 
     Manages the BLE connection lifecycle and handles the handshake/measurement
-    flow for the ES-CS20M (QN-series) protocol.
+    flow for the ES-CS20M variants using the QN protocol - ESCS20MN (basic flavor) and ESCS20MA2 (extended flavor).
 
     The scale is always driven in *guest mode*: it does not allocate a
     persistent slot or store the reading. This simplifies the protocol handshake,
@@ -97,7 +97,7 @@ class RenphoQNScale(GattScale):
         scanning_mode: BluetoothScanningMode = BluetoothScanningMode.ACTIVE,
         adapter: str | None = None,
         bleak_scanner_backend: BaseBleakScanner | None = None,
-        cooldown_seconds: int = 0,
+        cooldown_seconds: int = 5,
         max_connect_attempts: int = 2,
         logger: logging.Logger | None = None,
     ) -> None:

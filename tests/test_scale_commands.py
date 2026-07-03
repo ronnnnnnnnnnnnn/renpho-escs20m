@@ -16,16 +16,16 @@ import pytest
 
 from renpho_escs20m import RenphoESCS20MScale
 from renpho_escs20m.const import (
-    CMD_END_MEASUREMENT,
     RESISTANCE_1_KEY,
     RESISTANCE_2_KEY,
     WEIGHT_KEY,
-    _MEASUREMENT_STATUS_STABLE,
-    _MEASUREMENT_STATUS_STABLE_WITH_METRICS,
 )
 from renpho_escs20m.data import WeightUnit
 from renpho_escs20m.qn.protocol import (
     Profile,
+    _MEASUREMENT_STATUS_STABLE,
+    _MEASUREMENT_STATUS_STABLE_WITH_METRICS,
+    build_end_measurement_command,
     build_unit_update_command,
     build_user_profile_command,
     parse_basic_measurement,
@@ -113,7 +113,7 @@ async def test_handle_measurement_only_sends_end_measurement_for_stable_with_met
         "00:11:22:33:44:55",
     )
     await asyncio.sleep(0)
-    scale._safe_write.assert_awaited_once_with(CMD_END_MEASUREMENT)
+    scale._safe_write.assert_awaited_once_with(build_end_measurement_command())
     assert callback.call_count == 1
 
 
@@ -324,7 +324,7 @@ async def test_escs20mn_final_frame_fires_callback_and_ends():
         RESISTANCE_1_KEY: 508,
         RESISTANCE_2_KEY: 500,
     }
-    scale._safe_write.assert_awaited_once_with(CMD_END_MEASUREMENT)
+    scale._safe_write.assert_awaited_once_with(build_end_measurement_command())
 
 
 @pytest.mark.asyncio
@@ -345,7 +345,7 @@ async def test_escs20mn_duplicate_final_frame_fires_once():
     scale._handle_basic_measurement(frame, "QN-Scale", "addr")
     await asyncio.sleep(0)
     assert callback.call_count == 1
-    scale._safe_write.assert_awaited_once_with(CMD_END_MEASUREMENT)
+    scale._safe_write.assert_awaited_once_with(build_end_measurement_command())
 
 
 @pytest.mark.asyncio

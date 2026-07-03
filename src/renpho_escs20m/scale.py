@@ -224,7 +224,7 @@ class GattScale(RenphoScale, abc.ABC):
         scanning_mode: BluetoothScanningMode = BluetoothScanningMode.ACTIVE,
         adapter: str | None = None,
         bleak_scanner_backend: BaseBleakScanner | None = None,
-        cooldown_seconds: int = 0,
+        cooldown_seconds: int = 5,
         max_connect_attempts: int = 2,
         logger: logging.Logger | None = None,
     ) -> None:

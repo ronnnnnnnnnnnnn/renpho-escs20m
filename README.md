@@ -31,7 +31,6 @@ confirmed-working models.
 - Guest-mode protocol — coexists safely with users registered by the official Renpho app on the same scale.
 - Three modes: fixed-user (with `Profile`), user-detection (with async resolver), and weight-only.
 - `BodyMetrics` derives 9 body-composition metrics from a stable reading: BMI, fat-free mass, body water %, skeletal muscle %, muscle mass, bone mass, protein %, BMR, and a body fat % passthrough.
-- Optional RX/TX payload logging via standard Python `logging`.
 - **Experimental:** weight-only support for the broadcast-only ES-CS20M subvariant via `RenphoAABBScale` (no body composition — see [Device compatibility](#device-compatibility)).
 
 ## Installation
@@ -54,7 +53,6 @@ depends on which one its hardware uses:
 |------------|-----------|-----------------|----------|
 | QN-series  | GATT      | ✅ Supported     | Weight, impedance, body-composition metrics, display-unit control |
 | `0xaabb`   | Broadcast | 🔬 Experimental  | Weight only (display unit observed, not settable) |
-| `0x55aa`   | GATT      | ❌ Not yet       | — |
 
 ### Identifying your scale
 
@@ -96,18 +94,12 @@ connection, using a different (`0xaabb`) protocol. The library has
 |----------------|------|-------------------|----------------------|
 | ES-CS20M       | —    | `2APXUES-CS20M`   | `0xaabb` (broadcast) |
 
-Caveats: **weight only** — this scale performs no impedance/BIA (the official
-app derives body composition from the profile alone), so `BodyMetrics` does
-not apply. It reports the unit shown on its display but cannot be told to
-change it. Support has been validated against captured advertisements, not
-yet against live hardware.
-
 Known-incompatible — `0x55aa` (not yet supported):
 
 | Marketed model | HVIN        | FCC ID            | Protocol (first payload bytes) |
 |----------------|-------------|-------------------|--------------------------------|
-| ES-CS20M       | `ESCS20MB2` | `2A26P-ESCS20MB2` | `0x55aa`                       |
-| ES-26BB-B      | `ES26BBB`   | ?                 | `0x55aa`                       |
+| ES-CS20M       | `ESCS20MB2` | `2A26P-ESCS20MB2` | `0x55aa` (extended flavor)     |
+| ES-26BB-B      | `ES26BBB`   | ?                 | `0x55aa` (basic flavor)        |
 
 The **Protocol** column records the first bytes of the notification frames
 each unsupported variant emits — a rough fingerprint of the (different) BLE
