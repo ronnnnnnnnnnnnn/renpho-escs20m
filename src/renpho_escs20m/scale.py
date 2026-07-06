@@ -114,9 +114,15 @@ class RenphoScale(abc.ABC):
     Abstract base for every Renpho scale variant.
 
     Handles the parts common to every model regardless of how measurements are
-    obtained: BLE scanner setup and lifecycle, address filtering, and the
-    notification callback. Transport-specific behaviour lives in the
-    :class:`GattScale` and :class:`AdvertisementScale` subclasses.
+    obtained: BLE scanner setup and lifecycle, address filtering, the
+    notification callback, and the cooldown gate that ignores advertisements
+    while a cooldown window is open. The base only *checks* the window;
+    each subclass decides when to arm it (:class:`GattScale` on disconnect,
+    :class:`AdvertisementScale` on delivering a reading). The window is
+    disabled by default (``cooldown_seconds=0``) at the transport level —
+    a sensible length is hardware knowledge, so the concrete model classes
+    set their own defaults. Transport-specific behaviour lives in the
+    subclasses' :meth:`_handle_advertisement`.
     """
 
     def __init__(
@@ -128,6 +134,7 @@ class RenphoScale(abc.ABC):
         scanning_mode: BluetoothScanningMode = BluetoothScanningMode.ACTIVE,
         adapter: str | None = None,
         bleak_scanner_backend: BaseBleakScanner | None = None,
+        cooldown_seconds: int = 0,
         logger: logging.Logger | None = None,
     ) -> None:
         self._logger = logger or _LOGGER
@@ -138,6 +145,8 @@ class RenphoScale(abc.ABC):
         self.address = address
         self._notification_callback = notification_callback
         self._display_unit: WeightUnit = WeightUnit(display_unit)
+        self._cooldown_seconds = cooldown_seconds
+        self._cooldown_end_time: float = 0
         self._bg_tasks: set[asyncio.Task] = set()
 
         if bleak_scanner_backend is None:
@@ -178,11 +187,33 @@ class RenphoScale(abc.ABC):
             raise ValueError("display_unit cannot be None")
         self._display_unit = WeightUnit(value)
 
-    @abc.abstractmethod
     async def _advertisement_callback(
         self, ble_device: BLEDevice, advertisement_data: AdvertisementData
     ) -> None:
-        """Handle an advertisement from the scanner for the target scale."""
+        """Filter advertisements from the scanner and dispatch the target
+        scale's to :meth:`_handle_advertisement`.
+
+        Drops advertisements from other devices, and all advertisements while
+        the cooldown window is open.
+        """
+        if ble_device.address != self.address:
+            return
+
+        if self._cooldown_seconds > 0 and time.time() < self._cooldown_end_time:
+            self._logger.debug(
+                "Ignoring advertisement during cooldown (ends at %s)",
+                self._cooldown_end_time,
+            )
+            return
+
+        await self._handle_advertisement(ble_device, advertisement_data)
+
+    @abc.abstractmethod
+    async def _handle_advertisement(
+        self, ble_device: BLEDevice, advertisement_data: AdvertisementData
+    ) -> None:
+        """Handle an advertisement from the target scale (already filtered by
+        address and cooldown)."""
 
     async def async_start(self) -> None:
         """Start BLE scanning and begin listening for the target scale."""
@@ -224,7 +255,7 @@ class GattScale(RenphoScale, abc.ABC):
         scanning_mode: BluetoothScanningMode = BluetoothScanningMode.ACTIVE,
         adapter: str | None = None,
         bleak_scanner_backend: BaseBleakScanner | None = None,
-        cooldown_seconds: int = 5,
+        cooldown_seconds: int = 0,
         max_connect_attempts: int = 2,
         logger: logging.Logger | None = None,
     ) -> None:
@@ -239,12 +270,11 @@ class GattScale(RenphoScale, abc.ABC):
             scanning_mode=scanning_mode,
             adapter=adapter,
             bleak_scanner_backend=bleak_scanner_backend,
+            cooldown_seconds=cooldown_seconds,
             logger=logger,
         )
         self._client: BleakClient | None = None
         self._initializing: bool = False
-        self._cooldown_seconds = cooldown_seconds
-        self._cooldown_end_time: float = 0
         self._max_connect_attempts = max_connect_attempts
         self._battery_level: int | None = None
         self._firmware_revision: str | None = None
@@ -312,19 +342,9 @@ class GattScale(RenphoScale, abc.ABC):
     ) -> None:
         """Handle a raw notification payload from the scale."""
 
-    async def _advertisement_callback(
+    async def _handle_advertisement(
         self, ble_device: BLEDevice, _: AdvertisementData
     ) -> None:
-        if ble_device.address != self.address:
-            return
-
-        if self._cooldown_seconds > 0 and time.time() < self._cooldown_end_time:
-            self._logger.debug(
-                "Ignoring advertisement during cooldown (ends at %s)",
-                self._cooldown_end_time,
-            )
-            return
-
         async with self._lock:
             if self._client is not None or self._initializing:
                 return
@@ -365,6 +385,12 @@ class AdvertisementScale(RenphoScale, abc.ABC):
     Each advertisement from the target scale has its manufacturer-data entries
     passed to :meth:`_parse`; a non-``None`` result is wrapped in a
     :class:`ScaleData` and delivered to the notification callback.
+
+    A weigh-in makes the scale re-broadcast its final frame for the whole
+    advertising burst, so delivering a reading arms the cooldown window: one
+    callback per weigh-in, with the repeated final frames (and any unit
+    observation) suppressed until the window closes. ``cooldown_seconds=0``
+    delivers every final frame.
     """
 
     # Fallback device name used when the advertisement carries none.
@@ -404,12 +430,9 @@ class AdvertisementScale(RenphoScale, abc.ABC):
         """
         return None
 
-    async def _advertisement_callback(
+    async def _handle_advertisement(
         self, ble_device: BLEDevice, advertisement_data: AdvertisementData
     ) -> None:
-        if ble_device.address != self.address:
-            return
-
         for company_id, mfr_bytes in advertisement_data.manufacturer_data.items():
             payload = bytearray(mfr_bytes)
             self._logger.debug(
@@ -433,4 +456,5 @@ class AdvertisementScale(RenphoScale, abc.ABC):
                         measurements=parsed,
                     )
                 )
+                self._cooldown_end_time = time.time() + self._cooldown_seconds
                 return

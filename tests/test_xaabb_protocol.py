@@ -136,6 +136,64 @@ async def test_scale_ignores_advertisement_from_other_address():
 
 
 @pytest.mark.asyncio
+async def test_repeated_final_frames_within_cooldown_deliver_once():
+    # A weigh-in re-broadcasts the final frame for the whole advertising
+    # burst; delivering a reading arms the cooldown so only one lands.
+    callback = MagicMock()
+    scale = RenphoAABBScale(KG_MAC, callback, bleak_scanner_backend=MagicMock())
+    device = SimpleNamespace(address=KG_MAC, name="Renpho Scale")
+    adv = SimpleNamespace(manufacturer_data={MANUFACTURER_ID: bytes(KG_FINAL)})
+
+    await scale._advertisement_callback(device, adv)
+    await scale._advertisement_callback(device, adv)
+
+    assert callback.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_final_frame_after_cooldown_expiry_delivers_again():
+    callback = MagicMock()
+    scale = RenphoAABBScale(KG_MAC, callback, bleak_scanner_backend=MagicMock())
+    device = SimpleNamespace(address=KG_MAC, name="Renpho Scale")
+    adv = SimpleNamespace(manufacturer_data={MANUFACTURER_ID: bytes(KG_FINAL)})
+
+    await scale._advertisement_callback(device, adv)
+    scale._cooldown_end_time = 0  # simulate the window elapsing
+    await scale._advertisement_callback(device, adv)
+
+    assert callback.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_zero_cooldown_delivers_every_final_frame():
+    callback = MagicMock()
+    scale = RenphoAABBScale(
+        KG_MAC, callback, bleak_scanner_backend=MagicMock(), cooldown_seconds=0
+    )
+    device = SimpleNamespace(address=KG_MAC, name="Renpho Scale")
+    adv = SimpleNamespace(manufacturer_data={MANUFACTURER_ID: bytes(KG_FINAL)})
+
+    await scale._advertisement_callback(device, adv)
+    await scale._advertisement_callback(device, adv)
+
+    assert callback.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_non_final_frame_does_not_arm_cooldown():
+    callback = MagicMock()
+    scale = RenphoAABBScale(KG_MAC, callback, bleak_scanner_backend=MagicMock())
+    device = SimpleNamespace(address=KG_MAC, name="Renpho Scale")
+    settling = SimpleNamespace(manufacturer_data={MANUFACTURER_ID: bytes(KG_SETTLING)})
+    final = SimpleNamespace(manufacturer_data={MANUFACTURER_ID: bytes(KG_FINAL)})
+
+    await scale._advertisement_callback(device, settling)
+    await scale._advertisement_callback(device, final)
+
+    assert callback.call_count == 1
+
+
+@pytest.mark.asyncio
 async def test_scale_ignores_non_final_advertisement():
     callback = MagicMock()
     scale = RenphoAABBScale(LB_MAC, callback, bleak_scanner_backend=MagicMock())
