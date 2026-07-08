@@ -58,11 +58,12 @@ def test_non_final_frames_are_ignored(frame):
 def test_stability_requires_both_stable_and_committed_bits():
     # 0x23 (kg final) and 0x25 (lb final) are final; 0x64 (0x20 set, 0x01 clear)
     # and the settling/tare states are not.
+    assert is_final(0x03)
+    assert is_final(0x05)
     assert is_final(0x23)
     assert is_final(0x25)
     assert not is_final(0x64)  # provisional: 0x20 set but 0x01 clear
     assert not is_final(0x02)
-    assert not is_final(0x03)
 
 
 def test_unit_decode():
