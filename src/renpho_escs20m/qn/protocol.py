@@ -202,7 +202,7 @@ def build_stored_measurement_query(
 ) -> bytearray:
     """Build the basic-flavor stored-measurement query (``22 04``).
 
-    The scale answers with one ``23 13`` record per offline reading (or a
+    The scale answers with one 0x23 record per offline reading (or a
     single ``count=0`` frame when the store is empty) — see
     :func:`parse_stored_measurement`. Delivering a record deletes it from
     the scale's store; there is no separate delete command.
@@ -340,12 +340,12 @@ class _StoredFrame(NamedTuple):
 
 
 def parse_stored_measurement(payload: bytearray) -> _StoredFrame:
-    """Decode a stored offline-measurement record (``23 13``, 19 bytes).
+    """Decode a stored offline-measurement record.
 
     The scale sends one record per offline reading in response to the
-    ``22 04`` query, newest first. Layout::
+    query, newest first. Layout::
 
-        0..2    prefix 23 13 <vendor>
+        0..2    prefix 23 <length> <vendor>
         3       count — total records in this batch (0 = store empty)
         4       index — 1-based position of this record in the batch
         5..8    timestamp, little-endian uint32, seconds since
@@ -384,14 +384,14 @@ class _ExtendedStoredFrame(NamedTuple):
 
 
 def parse_extended_stored_measurement(payload: bytearray) -> _ExtendedStoredFrame:
-    """Decode an extended-flavor stored record (``23 13``, 19 bytes).
+    """Decode an extended-flavor stored record.
 
     The extended flavor inserts a store-user-index byte at offset 5
     (``0xF0`` = record not assigned to a user slot) and appends the
     on-device body-fat result, shifting the shared fields by one byte
     relative to :func:`parse_stored_measurement`::
 
-        0..2    prefix 23 13 <vendor>
+        0..2    prefix 23 <length> <vendor>
         3       count — total records in this batch (0 = store empty)
         4       index — 1-based position of this record in the batch
         5       store user index (0xF0 = unassigned)

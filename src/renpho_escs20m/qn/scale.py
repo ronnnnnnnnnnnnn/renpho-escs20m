@@ -160,7 +160,7 @@ class RenphoQNScale(GattScale):
         self._vendor_byte: int = _DEFAULT_VENDOR_BYTE
 
         # True once this session's stored-measurement query used the
-        # extended form — extended 23 13 records shift their fields by one
+        # extended form — extended 0x23 records shift their fields by one
         # byte, so the record handler must pick the matching parser.
         self._stored_records_extended = False
 
@@ -340,7 +340,7 @@ class RenphoQNScale(GattScale):
         )
 
     def _handle_stored_measurement(self, payload: bytearray, address: str) -> None:
-        """Handle a stored offline-measurement record (``23 13``, 19 bytes).
+        """Handle a stored offline-measurement record.
 
         Sent by the scale only in response to our stored-measurement
         query, one frame per offline reading (``count=0`` when the store
@@ -348,7 +348,7 @@ class RenphoQNScale(GattScale):
         receiving and discarding it here is what clears the store. Never
         fires the measurement callback.
         """
-        if payload[1] != _LEN_STORED_MEASUREMENT or len(payload) < 19:
+        if len(payload) < _LEN_STORED_MEASUREMENT:
             self._logger.warning(
                 "ES-CS20M stored-measurement frame from %s has unexpected "
                 "length; ignoring: %s",
