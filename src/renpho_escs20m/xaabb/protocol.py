@@ -17,10 +17,7 @@ _MAGIC = b"\xaa\xbb"
 # Need bytes up to index 18 (weight high byte).
 _MIN_PAYLOAD_LEN = 19
 
-# A reading is final only when BOTH the stable bit (0x20) and the committed
-# bit (0x01) are set. Requiring the committed bit rejects the ``0x64``
-# provisional/held frames, which set 0x20 but appear mid-settling.
-_FINAL_MASK = 0x21
+_FINAL_FLAG = 0x01
 
 # Display unit lives in status byte 15, bits 1-2: (byte15 >> 1) & 0x07.
 _UNIT_BY_CODE = {1: WeightUnit.KG, 2: WeightUnit.LB}
@@ -38,7 +35,7 @@ def decode_display_unit(status_byte: int) -> WeightUnit | None:
 
 
 def is_final(status_byte: int) -> bool:
-    return (status_byte & _FINAL_MASK) == _FINAL_MASK
+    return (status_byte & _FINAL_FLAG) == _FINAL_FLAG
 
 
 def parse_broadcast(company_id: int, payload: bytearray) -> BroadcastReading | None:
