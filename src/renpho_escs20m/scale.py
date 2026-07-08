@@ -1,7 +1,5 @@
 """Transport base classes shared by every Renpho scale variant.
 
-The hierarchy mirrors the ``etekcity_esf551_ble`` library:
-
 - :class:`RenphoScale` — transport-agnostic: BLE scanner setup + lifecycle,
   address filtering, and the notification callback.
 - :class:`GattScale` — variants that deliver measurements over a GATT
@@ -10,7 +8,7 @@ The hierarchy mirrors the ``etekcity_esf551_ble`` library:
   BLE advertisements with no connection (0xaabb).
 
 Protocol-specific handling lives in the per-protocol subpackages
-(``escs20m/``, ``broadcast/``).
+(``qn/``, ``xaabb/``).
 """
 
 from __future__ import annotations

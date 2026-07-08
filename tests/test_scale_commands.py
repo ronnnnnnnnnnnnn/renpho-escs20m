@@ -654,9 +654,7 @@ async def test_stored_measurement_unexpected_length_is_ignored():
 # --- Extended-flavor stored records ----------------------------------------
 #
 # The extended flavor shifts the record fields by one byte (store-user-index
-# at offset 5) and appends the on-device body-fat result at 16-17. No
-# non-empty extended record has been captured yet; these vectors are
-# synthesized from the layout the official SDK decodes.
+# at offset 5) and appends the on-device body-fat result at 16-17.
 
 
 def test_parse_extended_stored_measurement_layout():

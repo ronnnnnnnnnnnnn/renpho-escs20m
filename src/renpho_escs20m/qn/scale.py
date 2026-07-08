@@ -13,6 +13,10 @@ from bleak.backends.scanner import BaseBleakScanner
 from ..const import (
     BODY_FAT_KEY,
     COMMAND_CHARACTERISTIC_UUID,
+    FFE0_ALT_COMMAND_CHARACTERISTIC_UUID,
+    FFE0_COMMAND_CHARACTERISTIC_UUID,
+    FFE0_INDICATE_CHARACTERISTIC_UUID,
+    FFE0_NOTIFY_CHARACTERISTIC_UUID,
     NOTIFY_CHARACTERISTIC_UUID,
     RESISTANCE_1_KEY,
     RESISTANCE_2_KEY,
@@ -63,6 +67,12 @@ _STATE_PROFILE_RESOLVING = 8
 _STATE_BASIC_FINAL = 16
 # Set once the stored-measurement query has been sent this session.
 _STATE_STORED_QUERY = 32
+
+# On the FFE0 transport command writes are split across two characteristics
+# (capture-verified): set-time (0x20) and the stored-measurement query
+# (0x22) go to FFE4, everything else to FFE3. (The FFF0 transport has a
+# single shared command characteristic, FFF2.)
+_FFE0_ALT_COMMAND_OPCODES = frozenset({0x20, 0x22})
 
 
 class RenphoQNScale(GattScale):
@@ -184,15 +194,28 @@ class RenphoQNScale(GattScale):
                 ble_device.address,
             )
             await self._populate_device_metadata(client)
+
+            def handler(char: BleakGATTCharacteristic, data: bytearray) -> None:
+                self._notification_handler(
+                    char, data, ble_device.name, ble_device.address
+                )
+
+            # Prefer the FFF0 transport (renpho ES-CS20M), then fall back to
+            # the FFE0 transport (e.g. Arboleaf CS20M).
             if weight_char := client.services.get_characteristic(
                 NOTIFY_CHARACTERISTIC_UUID
             ):
-                await client.start_notify(
-                    weight_char,
-                    lambda char, data: self._notification_handler(
-                        char, data, ble_device.name, ble_device.address
-                    ),
-                )
+                await client.start_notify(weight_char, handler)
+            elif weight_char := client.services.get_characteristic(
+                FFE0_NOTIFY_CHARACTERISTIC_UUID
+            ):
+                await client.start_notify(weight_char, handler)
+                # The FFE0 transport delivers the pre-measurement and
+                # stored-record frames as indications on FFE2, not on FFE1.
+                if indicate_char := client.services.get_characteristic(
+                    FFE0_INDICATE_CHARACTERISTIC_UUID
+                ):
+                    await client.start_notify(indicate_char, handler)
             else:
                 self._logger.error("ES-CS20M notification characteristic not found")
                 return
@@ -647,15 +670,31 @@ class RenphoQNScale(GattScale):
         )
         await self._safe_write(_build_command_for_profile(profile))
 
+    def _resolve_command_char(
+        self, opcode: int
+    ) -> BleakGATTCharacteristic | None:
+        """Pick the command characteristic for ``opcode`` on whichever GATT
+        transport the connected scale exposes.
+
+        FFF0 transport: everything goes to the single FFF2 characteristic.
+        FFE0 transport: the :data:`_FFE0_ALT_COMMAND_OPCODES` commands go
+        to FFE4, the rest to FFE3 — the split observed on the wire. The
+        routing is strict: a scale missing the required characteristic is
+        an unknown GATT layout, surfaced by the caller's skipped-write
+        warning rather than papered over with a guessed substitute.
+        """
+        services = self._client.services
+        if command_char := services.get_characteristic(COMMAND_CHARACTERISTIC_UUID):
+            return command_char
+        if opcode in _FFE0_ALT_COMMAND_OPCODES:
+            return services.get_characteristic(FFE0_ALT_COMMAND_CHARACTERISTIC_UUID)
+        return services.get_characteristic(FFE0_COMMAND_CHARACTERISTIC_UUID)
+
     async def _safe_write(self, data: bytearray) -> None:
         if not self._client:
             self._logger.warning("ES-CS20M cannot send command; no active client")
             return
-        if not (
-            command_char := self._client.services.get_characteristic(
-                COMMAND_CHARACTERISTIC_UUID
-            )
-        ):
+        if not (command_char := self._resolve_command_char(data[0])):
             self._logger.warning(
                 "ES-CS20M command characteristic not found, skipping write"
             )

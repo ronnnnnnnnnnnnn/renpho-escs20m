@@ -1,7 +1,17 @@
 """Constants for the Renpho ES-CS20M scale."""
 
+# QN-Scale hardware ships two GATT transports for the same wire protocol.
+# The renpho ES-CS20M uses the FFF0 service (preferred when present):
 NOTIFY_CHARACTERISTIC_UUID = "0000fff1-0000-1000-8000-00805f9b34fb"
 COMMAND_CHARACTERISTIC_UUID = "0000fff2-0000-1000-8000-00805f9b34fb"
+
+# Other QN scales (e.g. Arboleaf CS20M) expose the FFE0 service
+# instead. Pre-measurement and stored-record frames arrive as indications
+# on FFE2; set-time and stored-query commands go to FFE4, the rest to FFE3.
+FFE0_NOTIFY_CHARACTERISTIC_UUID = "0000ffe1-0000-1000-8000-00805f9b34fb"
+FFE0_INDICATE_CHARACTERISTIC_UUID = "0000ffe2-0000-1000-8000-00805f9b34fb"
+FFE0_COMMAND_CHARACTERISTIC_UUID = "0000ffe3-0000-1000-8000-00805f9b34fb"
+FFE0_ALT_COMMAND_CHARACTERISTIC_UUID = "0000ffe4-0000-1000-8000-00805f9b34fb"
 
 # Standard BLE SIG characteristics on the scale's Device Information services.
 BATTERY_LEVEL_CHARACTERISTIC_UUID = "00002a19-0000-1000-8000-00805f9b34fb"
@@ -15,6 +25,10 @@ RESISTANCE_2_KEY = "resistance_2"
 __all__ = [
     "NOTIFY_CHARACTERISTIC_UUID",
     "COMMAND_CHARACTERISTIC_UUID",
+    "FFE0_NOTIFY_CHARACTERISTIC_UUID",
+    "FFE0_INDICATE_CHARACTERISTIC_UUID",
+    "FFE0_COMMAND_CHARACTERISTIC_UUID",
+    "FFE0_ALT_COMMAND_CHARACTERISTIC_UUID",
     "BATTERY_LEVEL_CHARACTERISTIC_UUID",
     "FIRMWARE_REVISION_CHARACTERISTIC_UUID",
     "WEIGHT_KEY",

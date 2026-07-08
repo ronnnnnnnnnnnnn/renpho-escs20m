@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- FFE0 GATT transport support on `RenphoQNScale`: QN-Scale hardware ships
+  the same wire protocol on two GATT layouts, and the library now falls
+  back to the FFE0 service (FFE1 notify / FFE2 indicate / FFE3+FFE4
+  write — e.g. the Arboleaf CS20M) when the renpho FFF0 service is absent,
+  verified against a captured session. Previously these scales failed with
+  "notification characteristic not found" (#5).
 - `clear_stored_measurements` option on `RenphoQNScale` (default off):
   drains the scale's store of offline measurements — readings taken while
   nothing was connected — once per session. Receiving a stored reading

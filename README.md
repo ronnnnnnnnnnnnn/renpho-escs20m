@@ -6,12 +6,12 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 
 This package provides an unofficial interface for interacting with
-Renpho's ES-CS20M scale (and other Renpho scales that share the same
-QN-series protocol) over Bluetooth Low Energy. It also has
-experimental, weight-only support for a broadcast-only ES-CS20M
-subvariant that speaks a different protocol. See the [Device
-compatibility](#device-compatibility) section for the current list of
-confirmed-working models.
+Renpho's ES-CS20M scale (and other scales that share the same
+QN-series protocol, including some non-Renpho ones) over Bluetooth Low
+Energy. It also has experimental, weight-only support for a
+broadcast-only ES-CS20M subvariant that speaks a different protocol.
+See the [Device compatibility](#device-compatibility) section for the
+current list of confirmed-working models.
 
 > **Disclaimer:** This is an unofficial, community-developed library.
 > It is not affiliated with, endorsed by, or connected to Renpho, its
@@ -64,13 +64,9 @@ The reliable discriminator is the
 regulatory sticker on the back of the scale, including its trailing
 revision code (e.g. `…MA2` vs `…MB2` vs `…MN`). Some stickers don't
 print HVIN as a separate field — in that case the same identifier is
-embedded as the trailing portion of the **FCC ID** (e.g. FCC ID
-`2A26P-ESCS20M` → device code `ESCS20M`). The FCC ID column below
-lets you match on either.
-
-Some stickers don't print the HVIN as a separate field; in that case the
-same code is often embedded in the trailing portion of the **FCC ID** (e.g.
-`2A26P-ESCS20MA2`). The tables below list both.
+usually embedded as the trailing portion of the **FCC ID** (e.g. FCC
+ID `2A26P-ESCS20MA2` → device code `ESCS20MA2`). The tables below list
+both, so you can match on either.
 
 Confirmed-working (QN-series):
 
@@ -83,16 +79,23 @@ Confirmed-working (QN-series):
 | ES-30M         | `ES30MA2`   | `2A26P-ES30MA2`   |
 | ES-32MD        | `ESCS20MA2` | `2A26P-ESCS20MA2` |
 
-Experimental — broadcast subvariant (weight only):
+Experimental:
 
-One ES-CS20M subvariant (FCC ID `2APXUES-CS20M`) is **non-connectable** — it
-broadcasts weight in its BLE advertisements rather than over a GATT
-connection, using a different (`0xaabb`) protocol. The library has
-**experimental, weight-only** support for it via `RenphoAABBScale`:
+| Marketed model | HVIN | FCC ID            | Protocol               |
+|----------------|------|-------------------|------------------------|
+| Arboleaf CS20M | —    | `2ANDX-CS20M`     | QN-series (FFE0 GATT)  |
+| ES-CS20M       | —    | `2APXUES-CS20M`   | `0xaabb` (broadcast)   |
 
-| Marketed model | HVIN | FCC ID            | Protocol             |
-|----------------|------|-------------------|----------------------|
-| ES-CS20M       | —    | `2APXUES-CS20M`   | `0xaabb` (broadcast) |
+- **Arboleaf CS20M** — QN-series hardware ships the same wire protocol
+  on two GATT service layouts, and the library handles both: the FFF0
+  layout used by the Renpho models above, and the FFE0 layout
+  seen on some other QN scales, like this one. Full feature set via
+  `RenphoQNScale`.
+- **ES-CS20M (FCC ID `2APXUES-CS20M`)** — a **non-connectable**
+  subvariant: it broadcasts weight in its BLE advertisements rather
+  than connecting over GATT, using a different (`0xaabb`) protocol.
+  Weight-only support via `RenphoAABBScale` (no body composition, and
+  the display unit can be observed but not set).
 
 Known-incompatible — `0x55aa` (not yet supported):
 
@@ -107,11 +110,11 @@ protocol it speaks, kept for reference and possible future support work.
 
 The pattern so far: marketed model name is unreliable, but the HVIN — and specifically its revision suffix (`A2`, `B2`, `N`…) — tracks the actual hardware and apparently also the protocol. If your Renpho scale HVIN ends in `A2` or `N`, this library will likely work with it; if it ends in some other suffix, try it out to see if it works and report back on the issue tracker.
 
-> This library may also work with other QN-Scale varieties utilizing the same protocol, including non-Renpho ones. Feel free to report compatibility results on the issue tracker.
+> This library may also work with other QN-Scale varieties utilizing the same protocol (on either GATT layout), including non-Renpho ones. Feel free to report compatibility results on the issue tracker.
 
 ### Reporting a compatibility result
 
-If your scale isn't in either table, open an issue at
+If your scale isn't in any of the tables above, open an issue at
 [github.com/ronnnnnnnnnnnnn/renpho-escs20m/issues](https://github.com/ronnnnnnnnnnnnn/renpho-escs20m/issues)
 with:
 
