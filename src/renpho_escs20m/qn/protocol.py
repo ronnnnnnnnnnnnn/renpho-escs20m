@@ -24,6 +24,7 @@ _OP_MEASUREMENT = 0x10
 _OP_UNIT_REQUEST = 0x12
 _OP_MEAS_INIT_REQUEST = 0x14
 _OP_PRE_MEASUREMENT = 0x21
+_OP_STORED_MEASUREMENT = 0x23
 _OP_PROFILE_ACK = 0xA1
 
 # Frame length (byte 1) — selects the flavor on the measurement and
@@ -32,6 +33,7 @@ _LEN_EXTENDED_MEASUREMENT = 0x0E  # 14-byte frame, body fat on-device
 _LEN_BASIC_MEASUREMENT = 0x0B  # 11-byte frame, weight + impedance
 _LEN_EXTENDED_PRE_MEASUREMENT = 0x05  # scale wants a user-profile reply
 _LEN_BASIC_PRE_MEASUREMENT = 0x04  # no reply needed; scale streams on its own
+_LEN_STORED_MEASUREMENT = 0x13  # 19-byte stored offline-measurement record
 
 # Per-device byte at frame offset 2 (renpho's is 0xFF).
 _DEFAULT_VENDOR_BYTE = 0xFF
@@ -195,6 +197,36 @@ def build_end_measurement_command(vendor_byte: int = _DEFAULT_VENDOR_BYTE) -> by
     return cmd
 
 
+def build_stored_measurement_query(
+    vendor_byte: int = _DEFAULT_VENDOR_BYTE,
+) -> bytearray:
+    """Build the basic-flavor stored-measurement query (``22 04``).
+
+    The scale answers with one ``23 13`` record per offline reading (or a
+    single ``count=0`` frame when the store is empty) — see
+    :func:`parse_stored_measurement`. Delivering a record deletes it from
+    the scale's store; there is no separate delete command.
+    """
+    cmd = bytearray([0x22, 0x04, vendor_byte])
+    cmd.append(sum(cmd) & 0xFF)
+    return cmd
+
+
+def build_extended_stored_measurement_query(
+    vendor_byte: int = _DEFAULT_VENDOR_BYTE,
+) -> bytearray:
+    """Build the extended-flavor stored-measurement query (``22 06``).
+
+    The extended flavor uses a six-byte query whose payload varies with
+    the user context; ``00 01`` is the guest-session form, which is the
+    only mode this library drives. Answered like the basic query — see
+    :func:`build_stored_measurement_query`.
+    """
+    cmd = bytearray([0x22, 0x06, vendor_byte, 0x00, 0x01])
+    cmd.append(sum(cmd) & 0xFF)
+    return cmd
+
+
 def build_user_profile_command(
     sex: int,
     age: int,
@@ -293,6 +325,97 @@ def parse_extended_measurement(payload: bytearray) -> _ExtendedFrame:
         body_fat=body_fat,
         resistance_1=r1,
         resistance_2=r2,
+    )
+
+
+class _StoredFrame(NamedTuple):
+    """Decoded stored offline-measurement record fields."""
+
+    count: int
+    index: int
+    timestamp: int
+    weight_kg: float
+    resistance_1: int
+    resistance_2: int
+
+
+def parse_stored_measurement(payload: bytearray) -> _StoredFrame:
+    """Decode a stored offline-measurement record (``23 13``, 19 bytes).
+
+    The scale sends one record per offline reading in response to the
+    ``22 04`` query, newest first. Layout::
+
+        0..2    prefix 23 13 <vendor>
+        3       count — total records in this batch (0 = store empty)
+        4       index — 1-based position of this record in the batch
+        5..8    timestamp, little-endian uint32, seconds since
+                2000-01-01 00:00:00 UTC
+        9..10   weight, big-endian uint16, 0.01 kg
+        11..12  resistance 1
+        13..14  resistance 2
+        15..17  reserved (0x00)
+        18      checksum
+
+    ``timestamp`` is returned as unix seconds. When ``count == 0`` the
+    store is empty and the remaining fields are meaningless (bytes 5-8
+    carry an uninterpreted varying value) — callers must not read them.
+    """
+    return _StoredFrame(
+        count=payload[3],
+        index=payload[4],
+        timestamp=int.from_bytes(payload[5:9], "little") + _EPOCH_OFFSET,
+        weight_kg=round(int.from_bytes(payload[9:11], "big") / 100, 2),
+        resistance_1=int.from_bytes(payload[11:13], "big"),
+        resistance_2=int.from_bytes(payload[13:15], "big"),
+    )
+
+
+class _ExtendedStoredFrame(NamedTuple):
+    """Decoded extended-flavor stored offline-measurement record fields."""
+
+    count: int
+    index: int
+    user_index: int
+    timestamp: int
+    weight_kg: float
+    resistance_1: int
+    resistance_2: int
+    body_fat: float | None
+
+
+def parse_extended_stored_measurement(payload: bytearray) -> _ExtendedStoredFrame:
+    """Decode an extended-flavor stored record (``23 13``, 19 bytes).
+
+    The extended flavor inserts a store-user-index byte at offset 5
+    (``0xF0`` = record not assigned to a user slot) and appends the
+    on-device body-fat result, shifting the shared fields by one byte
+    relative to :func:`parse_stored_measurement`::
+
+        0..2    prefix 23 13 <vendor>
+        3       count — total records in this batch (0 = store empty)
+        4       index — 1-based position of this record in the batch
+        5       store user index (0xF0 = unassigned)
+        6..9    timestamp, little-endian uint32, seconds since
+                2000-01-01 00:00:00 UTC
+        10..11  weight, big-endian uint16, 0.01 kg
+        12..13  resistance 1
+        14..15  resistance 2
+        16..17  body fat, big-endian uint16, 0.1 %
+        18      checksum
+
+    As with the basic record, when ``count == 0`` the store is empty
+    and the remaining fields must not be read.
+    """
+    bf_raw = int.from_bytes(payload[16:18], "big")
+    return _ExtendedStoredFrame(
+        count=payload[3],
+        index=payload[4],
+        user_index=payload[5],
+        timestamp=int.from_bytes(payload[6:10], "little") + _EPOCH_OFFSET,
+        weight_kg=round(int.from_bytes(payload[10:12], "big") / 100, 2),
+        resistance_1=int.from_bytes(payload[12:14], "big"),
+        resistance_2=int.from_bytes(payload[14:16], "big"),
+        body_fat=round(bf_raw / 10, 1) if bf_raw else None,
     )
 
 

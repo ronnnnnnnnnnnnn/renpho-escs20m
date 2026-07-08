@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `clear_stored_measurements` option on `RenphoQNScale` (default off):
+  drains the scale's store of offline measurements — readings taken while
+  nothing was connected — once per session. Receiving a stored reading
+  deletes it from the scale (the protocol has no separate delete command),
+  so this is opt-in: enabling it hides those readings from the official
+  Renpho app. Drained readings are logged at debug level and discarded for now. 
+  Each flavor is queried with its own command form.
 - `RenphoAABBScale` — experimental, weight-only support for the
   broadcast-only (`0xaabb`) ES-CS20M subvariant (FCC ID `2APXUES-CS20M`).
   This scale is non-connectable: weight is read from its BLE advertisements.

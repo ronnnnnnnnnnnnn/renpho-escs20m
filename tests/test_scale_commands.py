@@ -23,18 +23,24 @@ from renpho_escs20m.const import (
 from renpho_escs20m.data import WeightUnit
 from renpho_escs20m.qn.protocol import (
     Profile,
+    _EPOCH_OFFSET,
     _MEASUREMENT_STATUS_STABLE,
     _MEASUREMENT_STATUS_STABLE_WITH_METRICS,
     build_end_measurement_command,
+    build_extended_stored_measurement_query,
+    build_stored_measurement_query,
     build_unit_update_command,
     build_user_profile_command,
     parse_basic_measurement,
     parse_extended_measurement,
+    parse_extended_stored_measurement,
+    parse_stored_measurement,
 )
 
 
 def _make_scale(
     profile: Profile | AsyncMock | None = None,
+    clear_stored_measurements: bool = False,
 ) -> tuple[RenphoESCS20MScale, MagicMock]:
     callback = MagicMock()
     scanner = MagicMock()
@@ -43,6 +49,7 @@ def _make_scale(
         callback,
         WeightUnit.KG,
         profile=profile,
+        clear_stored_measurements=clear_stored_measurements,
         bleak_scanner_backend=scanner,
     )
     return scale, callback
@@ -465,3 +472,247 @@ async def test_pre_measurement_len5_skips_profile_for_non_renpho():
     await asyncio.sleep(0)
     sent = [c.args[0].hex() for c in scale._safe_write.call_args_list]
     assert not any(h.startswith("a00d02") for h in sent), sent
+
+
+# --- Stored offline measurements (22 04 query / 23 13 records) -------------
+#
+# All frames below are real captured bytes from Renpho-app sessions. The
+# scale answers the query with one record per offline reading, newest
+# first; delivering a record deletes it from the scale's store.
+
+
+def test_stored_measurement_query_matches_capture():
+    assert build_stored_measurement_query().hex() == "2204ff25"
+
+
+def test_stored_measurement_query_echoes_vendor_byte():
+    cmd = build_stored_measurement_query(0x15)
+    assert cmd.hex() == "2204153b"
+    assert cmd[-1] == sum(cmd[:-1]) & 0xFF
+
+
+@pytest.mark.parametrize(
+    "hx,count,index,ts_raw,weight,r1,r2",
+    [
+        ("2313ff04015dcdb6311cd901fc01f00000002e", 4, 1, 0x31B6CD5D, 73.85, 508, 496),
+        ("2313ff04023dcdb6311c7001f001f6000000a0", 4, 2, 0x31B6CD3D, 72.80, 496, 502),
+        ("2313ff0403e5ccb6311d4201ef01f60000001a", 4, 3, 0x31B6CCE5, 74.90, 495, 502),
+        ("2313ff0404cfccb6311d4201fc01f10000000d", 4, 4, 0x31B6CCCF, 74.90, 508, 497),
+        ("2313ff0101d4cdb6311d2901f601fa000000f7", 1, 1, 0x31B6CDD4, 74.65, 502, 506),
+    ],
+)
+def test_parse_stored_measurement_decodes_captured_records(
+    hx, count, index, ts_raw, weight, r1, r2
+):
+    frame = parse_stored_measurement(bytearray.fromhex(hx))
+    assert frame.count == count
+    assert frame.index == index
+    assert frame.timestamp == ts_raw + _EPOCH_OFFSET
+    assert frame.weight_kg == weight
+    assert frame.resistance_1 == r1
+    assert frame.resistance_2 == r2
+
+
+@pytest.mark.parametrize(
+    "hx",
+    [
+        # basic flavor
+        "2313ff000094b7b63100000000000000000067",
+        # extended flavor (trailing bytes laid out slightly differently,
+        # but count=0 at byte 3 is all that matters)
+        "2313ff0000004b2e7e3100000000000000005d",
+    ],
+)
+def test_parse_stored_measurement_empty_store(hx):
+    """count=0 means the store is empty; the other fields are meaningless."""
+    frame = parse_stored_measurement(bytearray.fromhex(hx))
+    assert frame.count == 0
+
+
+def test_extended_stored_measurement_query_matches_capture():
+    """Guest-session extended query: payload 00 01 (the guest form)."""
+    assert build_extended_stored_measurement_query().hex() == "2206ff000128"
+
+
+def test_extended_stored_measurement_query_echoes_vendor_byte():
+    cmd = build_extended_stored_measurement_query(0x15)
+    assert cmd.hex() == "22061500013e"
+    assert cmd[-1] == sum(cmd[:-1]) & 0xFF
+
+
+@pytest.mark.asyncio
+async def test_basic_pre_measurement_sends_stored_query_when_enabled():
+    """On the basic flavor the query follows the 21 04 pre-measurement
+    frame; the meas-init reply alone must not trigger it."""
+    scale, _ = _make_scale(clear_stored_measurements=True)
+    scale._safe_write = AsyncMock()
+    scale._notification_handler(
+        MagicMock(), bytearray.fromhex("140bff000001000000001f"), "QN-Scale", "addr"
+    )
+    await asyncio.sleep(0)
+    sent = [c.args[0].hex() for c in scale._safe_write.call_args_list]
+    assert any(h.startswith("2008ff") for h in sent), sent
+    assert not any(h.startswith("22") for h in sent), sent
+
+    scale._notification_handler(
+        MagicMock(), bytearray.fromhex("2104ff0125"), "QN-Scale", "addr"
+    )
+    await asyncio.sleep(0)
+    sent = [c.args[0].hex() for c in scale._safe_write.call_args_list]
+    assert "2204ff25" in sent, sent
+
+
+@pytest.mark.asyncio
+async def test_extended_profile_ack_sends_extended_stored_query_when_enabled():
+    """On the extended flavor the query follows the a1 profile ack."""
+    scale, _ = _make_scale(clear_stored_measurements=True)
+    scale._safe_write = AsyncMock()
+    scale._notification_handler(
+        MagicMock(), bytearray.fromhex("2105ff0126"), "Renpho ES-CS20M", "addr"
+    )
+    await asyncio.sleep(0)
+    sent = [c.args[0].hex() for c in scale._safe_write.call_args_list]
+    assert any(h.startswith("a00d02") for h in sent), sent
+    assert not any(h.startswith("22") for h in sent), sent
+
+    scale._notification_handler(
+        MagicMock(), bytearray.fromhex("a10602fe01a8"), "Renpho ES-CS20M", "addr"
+    )
+    await asyncio.sleep(0)
+    sent = [c.args[0].hex() for c in scale._safe_write.call_args_list]
+    assert "2206ff000128" in sent, sent
+
+
+@pytest.mark.asyncio
+async def test_stored_query_sent_once_per_session():
+    scale, _ = _make_scale(clear_stored_measurements=True)
+    scale._safe_write = AsyncMock()
+    for hx in ("2104ff0125", "2104ff0125", "a10602fe01a8"):
+        scale._notification_handler(
+            MagicMock(), bytearray.fromhex(hx), "QN-Scale", "addr"
+        )
+        await asyncio.sleep(0)
+    sent = [c.args[0].hex() for c in scale._safe_write.call_args_list]
+    assert sum(h.startswith("22") for h in sent) == 1, sent
+
+
+@pytest.mark.asyncio
+async def test_stored_query_not_sent_by_default():
+    scale, _ = _make_scale()
+    scale._safe_write = AsyncMock()
+    for hx in (
+        "140bff000001000000001f",
+        "2104ff0125",
+        "2105ff0126",
+        "a10602fe01a8",
+    ):
+        scale._notification_handler(
+            MagicMock(), bytearray.fromhex(hx), "QN-Scale", "addr"
+        )
+        await asyncio.sleep(0)
+    sent = [c.args[0].hex() for c in scale._safe_write.call_args_list]
+    assert not any(h.startswith("22") for h in sent), sent
+
+
+@pytest.mark.asyncio
+async def test_stored_measurement_frames_never_fire_callback():
+    """Drained records are discarded; a live measurement afterwards still
+    goes through untouched."""
+    scale, callback = _make_scale(clear_stored_measurements=True)
+    scale._safe_write = AsyncMock()
+    for hx in (
+        "2313ff04015dcdb6311cd901fc01f00000002e",
+        "2313ff0404cfccb6311d4201fc01f10000000d",
+        "2313ff000094b7b63100000000000000000067",
+    ):
+        scale._notification_handler(MagicMock(), bytearray.fromhex(hx), "QN", "addr")
+    await asyncio.sleep(0)
+    callback.assert_not_called()
+    scale._safe_write.assert_not_awaited()
+
+    # Live basic-flavor final frame still fires the callback normally.
+    scale._notification_handler(
+        MagicMock(), bytearray.fromhex("100bff15810101fc01f4a3"), "QN", "addr"
+    )
+    await asyncio.sleep(0)
+    assert callback.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_stored_measurement_unexpected_length_is_ignored():
+    scale, callback = _make_scale(clear_stored_measurements=True)
+    scale._safe_write = AsyncMock()
+    # Truncated 0x23 frame (length byte says 0x13 but payload is short).
+    scale._notification_handler(
+        MagicMock(), bytearray.fromhex("2313ff0401"), "QN", "addr"
+    )
+    await asyncio.sleep(0)
+    callback.assert_not_called()
+    scale._safe_write.assert_not_awaited()
+
+
+# --- Extended-flavor stored records ----------------------------------------
+#
+# The extended flavor shifts the record fields by one byte (store-user-index
+# at offset 5) and appends the on-device body-fat result at 16-17. No
+# non-empty extended record has been captured yet; these vectors are
+# synthesized from the layout the official SDK decodes.
+
+
+def test_parse_extended_stored_measurement_layout():
+    frame = parse_extended_stored_measurement(
+        bytearray.fromhex("2313ff0201f04b2e7e311cd901f401f600e617")
+    )
+    assert frame.count == 2
+    assert frame.index == 1
+    assert frame.user_index == 0xF0  # record not assigned to a user slot
+    assert frame.timestamp == 0x317E2E4B + _EPOCH_OFFSET
+    assert frame.weight_kg == 73.85
+    assert frame.resistance_1 == 500
+    assert frame.resistance_2 == 502
+    assert frame.body_fat == 23.0
+
+
+def test_parse_extended_stored_measurement_zero_body_fat_is_none():
+    """A zero body-fat field is reported as None (not 0.0)."""
+    frame = parse_extended_stored_measurement(
+        bytearray.fromhex("2313ff0202024b2e7e311c7001f001f60000d7")
+    )
+    assert frame.user_index == 2
+    assert frame.weight_kg == 72.80
+    assert frame.resistance_1 == 496
+    assert frame.resistance_2 == 502
+    assert frame.body_fat is None
+
+
+@pytest.mark.asyncio
+async def test_failed_profile_ack_sends_no_stored_query():
+    """The extended query follows only a *successful* (status 0x01) ack."""
+    scale, _ = _make_scale(clear_stored_measurements=True)
+    scale._safe_write = AsyncMock()
+    scale._notification_handler(
+        MagicMock(), bytearray.fromhex("a10602fe00a7"), "Renpho ES-CS20M", "addr"
+    )
+    await asyncio.sleep(0)
+    sent = [c.args[0].hex() for c in scale._safe_write.call_args_list]
+    assert not any(h.startswith("22") for h in sent), sent
+
+
+@pytest.mark.asyncio
+async def test_extended_session_records_are_discarded_without_callback():
+    scale, callback = _make_scale(clear_stored_measurements=True)
+    scale._safe_write = AsyncMock()
+    scale._notification_handler(
+        MagicMock(), bytearray.fromhex("a10602fe01a8"), "Renpho ES-CS20M", "addr"
+    )
+    await asyncio.sleep(0)
+    assert scale._stored_records_extended
+    for hx in (
+        "2313ff0201f04b2e7e311cd901f401f600e617",
+        "2313ff0000004b2e7e3100000000000000005d",
+    ):
+        scale._notification_handler(
+            MagicMock(), bytearray.fromhex(hx), "Renpho ES-CS20M", "addr"
+        )
+    await asyncio.sleep(0)
+    callback.assert_not_called()

@@ -303,6 +303,15 @@ asyncio.run(main())
   - a `ProfileResolver` (user-detection mode),
   - `None` (weight-only mode, default).
 
+  `clear_stored_measurements=True` (default `False`) drains the scale's
+  store of offline measurements — readings taken while nothing was
+  connected — once per session. Receiving a stored reading deletes it
+  from the scale (the protocol has no separate delete command), so
+  enabling this hides those readings from any other client: leave it
+  off if you also sync the scale with the official Renpho app. Drained
+  readings are logged at debug level and discarded for now. Each flavor
+  is queried with its own command form.
+
   Additional keyword arguments (`adapter`, `cooldown_seconds`,
   `max_connect_attempts`, `bleak_scanner_backend`, `logger`) are
   available for advanced use — see the class docstring.

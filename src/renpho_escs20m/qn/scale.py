@@ -32,6 +32,7 @@ from .protocol import (
     _LEN_BASIC_MEASUREMENT,
     _LEN_EXTENDED_MEASUREMENT,
     _LEN_EXTENDED_PRE_MEASUREMENT,
+    _LEN_STORED_MEASUREMENT,
     _MEASUREMENT_STATUS_STABLE,
     _MEASUREMENT_STATUS_STABLE_WITH_METRICS,
     _MEASUREMENT_STATUS_UNSTABLE,
@@ -39,13 +40,18 @@ from .protocol import (
     _OP_MEASUREMENT,
     _OP_PRE_MEASUREMENT,
     _OP_PROFILE_ACK,
+    _OP_STORED_MEASUREMENT,
     _OP_UNIT_REQUEST,
     _build_command_for_profile,
     build_end_measurement_command,
+    build_extended_stored_measurement_query,
     build_measurement_initiation_command,
+    build_stored_measurement_query,
     build_unit_update_command,
     parse_basic_measurement,
     parse_extended_measurement,
+    parse_extended_stored_measurement,
+    parse_stored_measurement,
 )
 
 _STATE_UNIT_SET = 1
@@ -55,6 +61,8 @@ _STATE_PROFILE_RESOLVING = 8
 # Set once the basic-flavor final (status 0x01) measurement frame has been
 # handled, so a repeated final frame does not fire the callback twice.
 _STATE_BASIC_FINAL = 16
+# Set once the stored-measurement query has been sent this session.
+_STATE_STORED_QUERY = 32
 
 
 class RenphoQNScale(GattScale):
@@ -85,6 +93,15 @@ class RenphoQNScale(GattScale):
       stable frame).
     - ``None`` (default) — *weight-only mode*: the bootstrap profile (algorithm=0x00, no body fat calculation) is
       sent and never overridden; the scale streams weight only.
+
+    ``clear_stored_measurements`` (default ``False``) drains the scale's
+    store of offline measurements — readings taken while nothing was
+    connected — once per session. Delivering a stored record deletes it
+    from the scale (there is no separate delete command), so enabling
+    this hides those readings from any other client: leave it off if
+    the official Renpho app should still import them. Drained records
+    are logged at debug level and discarded for now. Each flavor takes its own query form (sent at
+    the point in the handshake where that flavor answers it).
     """
 
     def __init__(
@@ -94,6 +111,7 @@ class RenphoQNScale(GattScale):
         display_unit: WeightUnit = WeightUnit.KG,
         *,
         profile: Profile | ProfileResolver | None = None,
+        clear_stored_measurements: bool = False,
         scanning_mode: BluetoothScanningMode = BluetoothScanningMode.ACTIVE,
         adapter: str | None = None,
         bleak_scanner_backend: BaseBleakScanner | None = None,
@@ -114,6 +132,7 @@ class RenphoQNScale(GattScale):
         )
 
         self._state_mask = 0
+        self._clear_stored_measurements = clear_stored_measurements
 
         if profile is None:
             self._fixed_profile: Profile | None = None
@@ -140,6 +159,11 @@ class RenphoQNScale(GattScale):
         # and echoed back in our replies; defaults to renpho's 0xFF.
         self._vendor_byte: int = _DEFAULT_VENDOR_BYTE
 
+        # True once this session's stored-measurement query used the
+        # extended form — extended 23 13 records shift their fields by one
+        # byte, so the record handler must pick the matching parser.
+        self._stored_records_extended = False
+
     def _unavailable_callback(self, client) -> None:
         super()._unavailable_callback(client)
         if self._resolver_task is not None and not self._resolver_task.done():
@@ -152,6 +176,7 @@ class RenphoQNScale(GattScale):
             return
         self._state_mask = 0
         self._vendor_byte = _DEFAULT_VENDOR_BYTE
+        self._stored_records_extended = False
         try:
             self._logger.debug(
                 "ES-CS20M starting session for device %s (%s)",
@@ -197,6 +222,7 @@ class RenphoQNScale(GattScale):
                 _OP_UNIT_REQUEST,
                 _OP_MEAS_INIT_REQUEST,
                 _OP_PRE_MEASUREMENT,
+                _OP_STORED_MEASUREMENT,
             )
             and len(payload) >= 3
         ):
@@ -239,9 +265,20 @@ class RenphoQNScale(GattScale):
             self._handle_extended_measurement(payload, name, address)
         elif opcode == _OP_MEASUREMENT and length == _LEN_BASIC_MEASUREMENT:
             self._handle_basic_measurement(payload, name, address)
+        elif opcode == _OP_STORED_MEASUREMENT:
+            self._handle_stored_measurement(payload, address)
         elif opcode == _OP_PROFILE_ACK:
-            # Extended-flavor ack of our user-profile command; nothing to send.
+            # Extended-flavor ack of our user-profile command; the only
+            # follow-up is the optional stored-measurement query, which the
+            # extended flavor answers after a *successful* ack (byte 4
+            # 0x01) — a failed ack means no session user, so there is no
+            # store to read.
             self._logger.debug("ES-CS20M user profile acknowledged by %s", address)
+            if len(payload) >= 5 and payload[4] == 0x01:
+                self._stored_records_extended = True
+                self._query_stored_measurements(
+                    build_extended_stored_measurement_query(self._vendor_byte), address
+                )
         else:
             self._logger.debug(
                 "ES-CS20M ignoring unrecognized payload: %s", payload.hex()
@@ -275,6 +312,84 @@ class RenphoQNScale(GattScale):
         self._fire_and_forget(
             self._safe_write(build_measurement_initiation_command(self._vendor_byte)),
             name="escs20m-measurement-init",
+        )
+
+    def _query_stored_measurements(self, command: bytearray, address: str) -> None:
+        """Send a stored-measurement query once per session (if enabled).
+
+        Delivery of the returned records deletes them from the scale's
+        store, which is exactly the "clear" the option promises. Each
+        flavor takes its own query form, so the caller passes the built
+        command: ``22 04`` on basic (after its pre-measurement frame),
+        ``22 06 .. 00 01`` on extended (after the profile ack) — matching
+        where each flavor was observed answering it.
+        """
+        if (
+            not self._clear_stored_measurements
+            or self._state_mask & _STATE_STORED_QUERY
+        ):
+            return
+        self._state_mask |= _STATE_STORED_QUERY
+        self._logger.debug(
+            "ES-CS20M querying stored offline measurements on %s to clear them.",
+            address,
+        )
+        self._fire_and_forget(
+            self._safe_write(command),
+            name="escs20m-stored-query",
+        )
+
+    def _handle_stored_measurement(self, payload: bytearray, address: str) -> None:
+        """Handle a stored offline-measurement record (``23 13``, 19 bytes).
+
+        Sent by the scale only in response to our stored-measurement
+        query, one frame per offline reading (``count=0`` when the store
+        is empty). Delivery deletes the record from the scale, so simply
+        receiving and discarding it here is what clears the store. Never
+        fires the measurement callback.
+        """
+        if payload[1] != _LEN_STORED_MEASUREMENT or len(payload) < 19:
+            self._logger.warning(
+                "ES-CS20M stored-measurement frame from %s has unexpected "
+                "length; ignoring: %s",
+                address,
+                payload.hex(),
+            )
+            return
+        if payload[3] == 0:
+            self._logger.debug(
+                "ES-CS20M stored-measurement store on %s is empty.", address
+            )
+            return
+        if self._stored_records_extended:
+            ext = parse_extended_stored_measurement(payload)
+            self._logger.debug(
+                "ES-CS20M discarding stored offline measurement %d/%d from %s: "
+                "weight=%.2f kg, r1=%d, r2=%d, body_fat=%s, user_index=0x%02x, "
+                "timestamp=%d (delivery clears it from the scale).",
+                ext.index,
+                ext.count,
+                address,
+                ext.weight_kg,
+                ext.resistance_1,
+                ext.resistance_2,
+                ext.body_fat,
+                ext.user_index,
+                ext.timestamp,
+            )
+            return
+        frame = parse_stored_measurement(payload)
+        self._logger.debug(
+            "ES-CS20M discarding stored offline measurement %d/%d from %s: "
+            "weight=%.2f kg, r1=%d, r2=%d, timestamp=%d (delivery clears it "
+            "from the scale).",
+            frame.index,
+            frame.count,
+            address,
+            frame.weight_kg,
+            frame.resistance_1,
+            frame.resistance_2,
+            frame.timestamp,
         )
 
     def _handle_extended_pre_measurement(self, address: str) -> None:
@@ -330,6 +445,9 @@ class RenphoQNScale(GattScale):
             "over BLE (scale streams on its own). Body fat is computed "
             "off-scale from resistance.",
             address,
+        )
+        self._query_stored_measurements(
+            build_stored_measurement_query(self._vendor_byte), address
         )
 
     def _handle_extended_measurement(
