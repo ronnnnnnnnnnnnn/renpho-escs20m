@@ -72,6 +72,12 @@ class Profile:
     to drive the scale's body composition measurement in fixed-user mode, or
     return one from a :data:`ProfileResolver` for user-detection mode.
 
+    Only the extended flavor (HVIN ESCS20MA2) consumes it — that is the
+    variant that computes body fat on-device. The basic flavor takes no
+    profile over BLE; there, feed the same inputs plus the reading's
+    raw impedance to
+    :func:`~renpho_escs20m.qn.body_metrics.calculate_body_fat` instead.
+
     Attributes:
         sex: :class:`Sex` enum value.
         age: Integer years. The Renpho app uses birthday-aware age
@@ -100,15 +106,17 @@ class Profile:
 # mode, with the first stable weight reading. Should return the
 # :class:`Profile` for whichever user is on the scale, or ``None`` to
 # leave the scale running on the bootstrap profile (no body fat will be
-# produced — only weight will stream).
+# produced). Extended flavor only: the basic flavor never requests a
+# profile, so the resolver is never invoked for it.
 ProfileResolver = Callable[[float], Awaitable[Profile | None]]
 
 
 # Profile sent when no real profile is available yet — i.e. weight-only
 # mode (no profile ever) and the initial reply in user-detection mode
-# (overridden once the resolver completes). The scale will not
-# start a measurement at all without a profile reply, so we always send
-# one. ``algorithm=0x00`` tells the scale "no body fat calculation".
+# (overridden once the resolver completes). The extended-flavor scale
+# will not start a measurement at all without a profile reply, so we
+# always send one. ``algorithm=0x00`` tells the scale "no body fat
+# calculation" — the measurement itself still runs.
 _BOOTSTRAP_PROFILE = Profile(
     sex=Sex.Male,
     age=0,

@@ -87,9 +87,11 @@ class RenphoQNScale(GattScale):
     and prevents this library from clobbering or evicting any user the
     official Renpho app may have registered on the same scale.
 
-    The scale will not start a measurement without a profile
-    reply, so the library always sends one. The ``profile`` argument
-    selects one of three operating modes:
+    The ``profile`` argument only has an effect on the **extended
+    flavor** (HVIN ESCS20MA2), where the scale computes body fat
+    on-device from a profile sent over BLE. That flavor will not start
+    a measurement without a profile reply, so the library always sends
+    one; ``profile`` selects which:
 
     - :class:`Profile` instance — *fixed-user mode*: the profile is sent
       immediately, exactly as the Renpho app does for a known user.
@@ -102,7 +104,19 @@ class RenphoQNScale(GattScale):
       the scale's internal body fat calculation commit window (~2s after the first
       stable frame).
     - ``None`` (default) — *weight-only mode*: the bootstrap profile (algorithm=0x00, no body fat calculation) is
-      sent and never overridden; the scale streams weight only.
+      sent and never overridden, so the scale computes and displays no
+      body fat. "Weight-only" describes that outcome, not a filter on
+      the reported data — the scale still performs its impedance pass
+      and the final reading still carries raw impedance; only body fat
+      is absent.
+
+    The **basic flavor** (HVIN ESCS20MN) takes no profile over BLE, so
+    ``profile`` is ignored there: nothing is sent to the scale and a
+    resolver is never invoked. Its readings always carry weight plus
+    raw impedance regardless of mode, and body fat is computed
+    off-scale by the caller — see
+    :func:`~renpho_escs20m.qn.body_metrics.calculate_body_fat` and
+    :class:`~renpho_escs20m.qn.body_metrics.BodyMetrics`.
 
     ``clear_stored_measurements`` (default ``False``) drains the scale's
     store of offline measurements — readings taken while nothing was

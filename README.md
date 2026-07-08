@@ -306,6 +306,16 @@ asyncio.run(main())
   - a `ProfileResolver` (user-detection mode),
   - `None` (weight-only mode, default).
 
+  The profile modes only apply to the QN **extended flavor** (e.g. HVIN
+  `ESCS20MA2`) — the variant where the scale computes body fat
+  on-device from a profile sent over BLE. The **basic flavor** (HVIN
+  `ESCS20MN`) takes no profile over BLE, so the argument is ignored
+  there: readings always include weight plus raw impedance, and body
+  fat is computed off-scale via `calculate_body_fat()`. In all cases
+  "weight-only mode" refers to what the scale computes and displays —
+  it never restricts what the library reports: both flavors deliver
+  raw impedance in every mode, and it is passed through.
+
   `clear_stored_measurements=True` (default `False`) drains the scale's
   store of offline measurements — readings taken while nothing was
   connected — once per session. Receiving a stored reading deletes it
@@ -320,15 +330,22 @@ asyncio.run(main())
   available for advanced use — see the class docstring.
   `RenphoESCS20MScale` remains importable as a backward-compatible alias
   for `RenphoQNScale`.
-- `callback` (passed to `RenphoQNScale`) — invoked only on the
-  final `stable-with-metrics` frame the scale emits at the end of a
-  measurement. In user-detection mode, the earlier `stable` frame is
-  used only to trigger the profile resolver and does not reach the
-  callback. Within the frame, `ScaleData.measurements` always contains
-  `WEIGHT_KEY`; `BODY_FAT_KEY` and the two `RESISTANCE_*_KEY` entries
-  are present only when the scale actually produced non-zero values
-  for them — they will be absent in weight-only mode, in user-detection
-  mode if the resolver returned `None`, and any time `algorithm=0x00`.
+- `callback` (passed to `RenphoQNScale`) — invoked once per
+  measurement, on the final frame the scale emits (the
+  `stable-with-metrics` frame on the extended flavor; the status-`0x01`
+  final frame on the basic flavor). In user-detection mode, the earlier
+  `stable` frame is used only to trigger the profile resolver and does
+  not reach the callback. Within the frame, `ScaleData.measurements`
+  always contains `WEIGHT_KEY`; `BODY_FAT_KEY` and the two
+  `RESISTANCE_*_KEY` entries are present only when the scale actually
+  produced non-zero values for them. `BODY_FAT_KEY` requires the
+  extended flavor *and* a real profile: it is absent in weight-only
+  mode, in user-detection mode if the resolver returned `None`, and any
+  time `algorithm=0x00`. Impedance is reported by both flavors in every
+  mode — the impedance pass runs even under the bootstrap
+  (`algorithm=0x00`) profile. The basic flavor never produces
+  `BODY_FAT_KEY` — compute body fat from `RESISTANCE_1_KEY` with
+  `calculate_body_fat()`.
 - `scale.battery_level` — last successfully-read battery percentage
   (`int | None`). May be `None` until first successful read. **Reliability
   caveat:** on at least one observed unit (firmware `V10.0`) the scale
@@ -372,12 +389,15 @@ asyncio.run(main())
 ### Profiles
 
 - `Profile(sex, age, height_m, athlete=False, algorithm=0x04)` —
-  user-profile inputs the scale needs to compute body fat on-device.
+  user-profile inputs the scale needs to compute body fat on-device
+  (extended flavor; the basic flavor takes no profile over BLE — feed
+  the same inputs to `calculate_body_fat()` instead).
   See `Profile`'s docstring for the wire semantics of each field.
 - `ProfileResolver` — type alias for the async callback used in
   user-detection mode: `Callable[[float], Awaitable[Profile | None]]`.
   Receives the first stable weight in kg and returns the Profile to
-  write (or `None` to skip).
+  write (or `None` to skip). Extended flavor only — the basic flavor
+  never requests a profile, so the resolver is never invoked for it.
 
 ### Measurements
 
@@ -387,10 +407,11 @@ asyncio.run(main())
 - `WeightUnit` — `KG`, `LB`, `ST`, `ST_LB`.
 - Measurement-dict keys (constants importable from `renpho_escs20m`):
   - `WEIGHT_KEY` (`"weight"`) — kg
-  - `BODY_FAT_KEY` (`"body_fat"`) — % (only on stable-with-metrics frames)
+  - `BODY_FAT_KEY` (`"body_fat"`) — % (extended flavor only, and only
+    when the scale ran its on-device body fat calculation)
   - `RESISTANCE_1_KEY`, `RESISTANCE_2_KEY` (`"resistance_1"`,
-    `"resistance_2"`) — bioelectrical impedance in ohms (only on
-    stable-with-metrics frames; the two readings are typically within a
+    `"resistance_2"`) — bioelectrical impedance in ohms (present on
+    final frames when non-zero; the two readings are typically within a
     couple of ohms of each other and either can be fed to
     `calculate_body_fat()`).
 
@@ -437,8 +458,9 @@ should leave this at the default.
   Renpho's app selects from in normal use. The selection appears to
   depend on user region.
 - `algorithm=0x00` disables the on-scale body fat calculation
-  entirely; the scale streams weight only. This is what the library
-  uses internally during user-detection bootstrap.
+  entirely — the measurement itself still runs; the scale just
+  computes and displays no body fat. This is what the library uses
+  internally in weight-only mode and during user-detection bootstrap.
 - Other values (`0x01`, `0x02`, `0x05`, `0x06`) are accepted by the
   scale but don't seem to be used by Renpho's app and aren't validated
   against it — treat them as experimental.
