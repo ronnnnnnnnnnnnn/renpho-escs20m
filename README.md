@@ -295,6 +295,44 @@ async def main():
 asyncio.run(main())
 ```
 
+## Protocol detection
+
+`detect_protocol()` classifies a BLE advertisement (local name,
+manufacturer data, and address) as `ScaleProtocol.QN`,
+`ScaleProtocol.AABB`, or `None` if it isn't a recognized scale. Pair it
+with `SCALE_CLASSES` to pick the right client class without hardcoding
+`if`/`else` branches:
+
+```python
+from renpho_escs20m import SCALE_CLASSES, detect_protocol
+
+protocol = detect_protocol(local_name, manufacturer_data, address)
+if protocol is not None:
+    scale_cls = SCALE_CLASSES[protocol]
+    scale = scale_cls(address, notification_callback, ...)
+```
+
+Frame layouts (manufacturer-data value, company ID already stripped):
+
+- QN: `[0:2]` model identifier, 16-bit big-endian; `[2:5]` varies per
+  advertisement; `[5:11]` device MAC address, little-endian.
+- AABB: `[0:2]` `0xAABB` magic; `[2:8]` device MAC address, forward byte
+  order; `[8:]` protocol payload.
+
+Known QN model identifiers, observed in real advertisement captures:
+
+| Identifier | Notes |
+|---|---|
+| 0x095B | "Renpho-Scale", FF:04:00 OUI |
+| 0x099B | "QN-Scale", FF:04:00 OUI |
+| 0x09E9 | "QN-Scale", FF:03:00 OUI |
+| 0x0216 | "QN-Scale", D8:0B:CB OUI |
+
+Advertisements with an unrecognized QN model identifier still classify
+via a name/address fallback matcher and log a warning — reporting that
+warning (or an incompatible scale on the issue tracker) is how the
+identifier registry grows.
+
 ## API reference
 
 ### Scale client

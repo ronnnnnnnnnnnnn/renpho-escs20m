@@ -215,7 +215,7 @@ async def test_safe_write_warns_when_no_command_characteristic(caplog):
 # 0x23 stored records arrived as indications on FFE2; the rest as
 # notifications on FFE1 (the handler does not distinguish).
 _CAPTURE_RX = [
-    "120f15d2940bcb0bd83f013f0105da",  # unit request
+    "120f1505aa0bcb0bd83f013f010523",  # unit request
     "140b150000010000000035",  # measurement-init request
     "210515013c",  # pre-measurement (extended length, basic flavor)
     "2314150501da0100001c9301f901f300000000ca",  # stored records 1-5

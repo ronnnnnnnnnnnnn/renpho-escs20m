@@ -322,7 +322,7 @@ async def test_escs20mn_final_frame_fires_callback_and_ends():
     scale._handle_basic_measurement(
         bytearray.fromhex("100bff15810101fc01f4a3"),
         "QN-Scale",
-        "ff:03:00:67:0a:23",
+        "ff:03:00:67:aa:03",
     )
     await asyncio.sleep(0)
     assert callback.call_count == 1
@@ -381,9 +381,9 @@ async def test_notification_handler_replies_to_escs20mn_unit_request():
     scale, _ = _mn_scale()
     scale._notification_handler(
         MagicMock(),
-        bytearray.fromhex("1211ff230a670003ff03030500000507cf"),
+        bytearray.fromhex("1211ff03aa670003ff030305000005074f"),
         "QN-Scale",
-        "ff:03:00:67:0a:23",
+        "ff:03:00:67:aa:03",
     )
     await asyncio.sleep(0)
     scale._safe_write.assert_awaited_once()

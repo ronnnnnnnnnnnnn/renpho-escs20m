@@ -22,17 +22,17 @@ from renpho_escs20m.xaabb.protocol import (
 
 # --- real captured frames (manufacturer-data payload, from the aabb prefix) ---
 
-# kg scale (MAC ed:67:39:c5:cb:8f)
-KG_MAC = "ed:67:39:c5:cb:8f"
-KG_FINAL = bytes.fromhex("aabbed6739c5cb8f6d3e236a948b1f23008e214c0903f33e")  # 85.90 kg
-KG_SETTLING = bytes.fromhex("aabbed6739c5cb8f6d3e236a948b1f0200a7214c0903ef3e")  # 0x02
-KG_TARE = bytes.fromhex("aabbed6739c5cb8f5b3e236a948b1f030000004c0903ec3e")  # 0x03, 0
+# kg scale (MAC ed:67:39:c5:aa:0a)
+KG_MAC = "ed:67:39:c5:aa:0a"
+KG_FINAL = bytes.fromhex("aabbed6739c5aa0a6d3e236a948b1f23008e214c0903f33e")  # 85.90 kg
+KG_SETTLING = bytes.fromhex("aabbed6739c5aa0a6d3e236a948b1f0200a7214c0903ef3e")  # 0x02
+KG_TARE = bytes.fromhex("aabbed6739c5aa0a5b3e236a948b1f030000004c0903ec3e")  # 0x03, 0
 
-# lb scale (MAC ed:67:3b:1a:46:8d)
-LB_MAC = "ed:67:3b:1a:46:8d"
-LB_FINAL = bytes.fromhex("aabbed673b1a468d7986066a40b64b2500931c4c4403691f")  # 73.15 kg
+# lb scale (MAC ed:67:3b:1a:aa:06)
+LB_MAC = "ed:67:3b:1a:aa:06"
+LB_FINAL = bytes.fromhex("aabbed673b1aaa067986066a40b64b2500931c4c4403691f")  # 73.15 kg
 # 0x64 provisional/held frame: sets the 0x20 stable bit but is NOT final.
-LB_PROVISIONAL = bytes.fromhex("aabbed673b1a468d1387066a40b64b6422841c4c44030620")
+LB_PROVISIONAL = bytes.fromhex("aabbed673b1aaa061387066a40b64b6422841c4c44030620")
 
 
 def test_final_kg_frame_decodes_weight_and_unit():
