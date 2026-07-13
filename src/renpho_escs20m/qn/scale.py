@@ -684,9 +684,7 @@ class RenphoQNScale(GattScale):
         )
         await self._safe_write(_build_command_for_profile(profile))
 
-    def _resolve_command_char(
-        self, opcode: int
-    ) -> BleakGATTCharacteristic | None:
+    def _resolve_command_char(self, opcode: int) -> BleakGATTCharacteristic | None:
         """Pick the command characteristic for ``opcode`` on whichever GATT
         transport the connected scale exposes.
 

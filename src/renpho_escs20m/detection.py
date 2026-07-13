@@ -61,7 +61,7 @@ def _mac_bytes(address: str) -> bytes | None:
 def parse_qn_model_code(payload: bytes) -> int | None:
     """Return the model identifier from a QN (65535) payload.
 
-    ``payload`` is the manufacturer-data *value* (company ID stripped). 
+    ``payload`` is the manufacturer-data *value* (company ID stripped).
     The identifier is the first two bytes, big-endian. Returns None if too short.
     """
     if len(payload) < _QN_MODEL_START + 2:
@@ -100,7 +100,7 @@ def is_aabb_frame(payload: bytes, address: str | None = None) -> bool:
 
 
 # Model identifiers (payload bytes 0:2 big-endian)
-# Unknown variants are covered by FALLBACK_MATCHERS and reported via the log below. 
+# Unknown variants are covered by FALLBACK_MATCHERS and reported via the log below.
 # Add new identifiers as units are reported.
 KNOWN_QN_SCALE_IDENTIFIERS: frozenset[int] = frozenset(
     {

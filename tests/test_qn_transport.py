@@ -62,9 +62,7 @@ def _make_client(present_uuids: frozenset[str]) -> MagicMock:
     ``present_uuids``; lookups for anything else return None."""
     client = MagicMock(name="client")
     chars = {uuid: MagicMock(name=uuid) for uuid in present_uuids}
-    client.services.get_characteristic.side_effect = (
-        lambda uuid: chars.get(str(uuid))
-    )
+    client.services.get_characteristic.side_effect = lambda uuid: chars.get(str(uuid))
     client.start_notify = AsyncMock()
     client.write_gatt_char = AsyncMock()
     client.chars = chars
@@ -125,14 +123,10 @@ async def test_session_setup_prefers_fff0_when_both_transports_present():
 async def test_session_setup_ffe0_without_ffe2_still_subscribes_ffe1():
     scale, _ = _make_scale()
     client = _make_client(
-        frozenset(
-            {FFE0_NOTIFY_CHARACTERISTIC_UUID, FFE0_COMMAND_CHARACTERISTIC_UUID}
-        )
+        frozenset({FFE0_NOTIFY_CHARACTERISTIC_UUID, FFE0_COMMAND_CHARACTERISTIC_UUID})
     )
     await _run_session_setup(scale, client)
-    assert _subscribed_chars(client) == [
-        client.chars[FFE0_NOTIFY_CHARACTERISTIC_UUID]
-    ]
+    assert _subscribed_chars(client) == [client.chars[FFE0_NOTIFY_CHARACTERISTIC_UUID]]
 
 
 @pytest.mark.asyncio
@@ -181,9 +175,7 @@ async def test_safe_write_ffe0_skips_alt_opcodes_when_ffe4_absent(caplog):
     # the write and surfaces the unknown GATT layout in the logs.
     scale, _ = _make_scale()
     client = _make_client(
-        frozenset(
-            {FFE0_NOTIFY_CHARACTERISTIC_UUID, FFE0_COMMAND_CHARACTERISTIC_UUID}
-        )
+        frozenset({FFE0_NOTIFY_CHARACTERISTIC_UUID, FFE0_COMMAND_CHARACTERISTIC_UUID})
     )
     scale._client = client
     with caplog.at_level("WARNING"):
