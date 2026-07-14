@@ -1,4 +1,4 @@
-"""Golden regression tests for :mod:`renpho_escs20m.qn.body_metrics`.
+"""Golden regression tests for :mod:`renpho_escs20m.body_metrics`.
 
 Each parameter set is a real stable-with-metrics BLE frame captured
 from live Renpho ES-CS20M scales. The golden metric values match the

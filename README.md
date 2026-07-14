@@ -94,8 +94,9 @@ Experimental:
 - **ES-CS20M (FCC ID `2APXUES-CS20M`)** — a **non-connectable**
   subvariant: it broadcasts weight in its BLE advertisements rather
   than connecting over GATT, using a different (`0xaabb`) protocol.
-  Weight-only support via `RenphoAABBScale` (no body composition, and
-  the display unit can be observed but not set).
+  Supported via `RenphoAABBScale`. Impedance is not reported (for body
+  composition calculations see [Broadcast variant](#broadcast-variant)).
+  The display unit can be observed but not set.
 
 Known-incompatible — `0x55aa` (not yet supported):
 
@@ -268,7 +269,7 @@ the bootstrap profile (no body fat) before your resolved profile
 lands. If the BLE session ends while the resolver is still in flight,
 the library cancels the resolver task to avoid leaking work.
 
-### Broadcast variant (weight only)
+### Broadcast variant
 
 The broadcast-only `0xaabb` subvariant uses a different client,
 `RenphoAABBScale` — no `Profile`, no unit control, weight only:
@@ -294,6 +295,14 @@ async def main():
 
 asyncio.run(main())
 ```
+
+**Estimating body composition.** This scale transmits no impedance, so
+`RenphoAABBScale` reports weight only. You can still produce
+body-composition metrics by calling `calculate_body_fat()` / `BodyMetrics`
+with a **fixed synthetic impedance** (~500 Ω): the algorithm is
+near-impedance-independent in that band — verified <1 percentage-point
+change in body fat across R = 300–900 Ω — so the exact value barely
+matters, and ~500 reproduces pretty closely what the official Renpho app shows.
 
 ## Protocol detection
 

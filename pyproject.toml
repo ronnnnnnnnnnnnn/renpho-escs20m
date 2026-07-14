@@ -61,5 +61,4 @@ universal2 = true
 [tool.hatch.build.targets.sdist]
 include = [
     "/src",
-    "/CHANGELOG.md",
 ]

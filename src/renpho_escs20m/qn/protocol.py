@@ -12,10 +12,10 @@ import time
 from collections.abc import Awaitable, Callable
 from typing import NamedTuple
 
-from .body_metrics import Sex
+from ..body_metrics import Sex
 from ..data import WeightUnit
 
-# --- Wire protocol constants (moved from const.py) -------------------------
+# --- Wire protocol constants -----------------------------------------------
 
 _EPOCH_OFFSET = 946656000  # scale's epoch: 2000-01-01 00:00:00 UTC
 
@@ -76,7 +76,7 @@ class Profile:
     variant that computes body fat on-device. The basic flavor takes no
     profile over BLE; there, feed the same inputs plus the reading's
     raw impedance to
-    :func:`~renpho_escs20m.qn.body_metrics.calculate_body_fat` instead.
+    :func:`~renpho_escs20m.body_metrics.calculate_body_fat` instead.
 
     Attributes:
         sex: :class:`Sex` enum value.
@@ -305,7 +305,7 @@ def parse_extended_measurement(payload: bytearray) -> _ExtendedFrame:
     Parse a live measurement notification.
 
     Returns a _ExtendedFrame with decoded values. Resistance can be fed
-    to :func:`renpho_escs20m.qn.body_metrics.calculate_body_fat` to compute
+    to :func:`renpho_escs20m.body_metrics.calculate_body_fat` to compute
     body fat retroactively when the user identity is known later than
     the measurement (e.g. after a slow user-detection lookup).
     """

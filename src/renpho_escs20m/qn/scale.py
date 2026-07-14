@@ -115,8 +115,8 @@ class RenphoQNScale(GattScale):
     resolver is never invoked. Its readings always carry weight plus
     raw impedance regardless of mode, and body fat is computed
     off-scale by the caller — see
-    :func:`~renpho_escs20m.qn.body_metrics.calculate_body_fat` and
-    :class:`~renpho_escs20m.qn.body_metrics.BodyMetrics`.
+    :func:`~renpho_escs20m.body_metrics.calculate_body_fat` and
+    :class:`~renpho_escs20m.body_metrics.BodyMetrics`.
 
     ``clear_stored_measurements`` (default ``False``) drains the scale's
     store of offline measurements — readings taken while nothing was

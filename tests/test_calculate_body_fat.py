@@ -1,5 +1,5 @@
 """Golden regression tests for
-:func:`renpho_escs20m.qn.body_metrics.calculate_body_fat`.
+:func:`renpho_escs20m.body_metrics.calculate_body_fat`.
 
 Each parameter set is a real stable-with-metrics BLE frame captured
 from live Renpho ES-CS20M scales — same scale, three demographic

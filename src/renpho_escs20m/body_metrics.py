@@ -1,9 +1,17 @@
-"""Body composition metrics for the Renpho ES-CS20M.
+"""Body-composition math for Renpho / QingNiu-family scales.
 
-The scale computes body fat on-device and publishes it in
-the BLE measurement frame; :class:`BodyMetrics` takes that body fat
-value as input and derives the remaining metrics (BMI, fat-free mass,
-water, skeletal muscle, bone, muscle, protein, BMR) from it.
+Shared across protocol variants (not tied to the QN wire protocol), which
+is why it lives at the package top level rather than under ``qn/``:
+
+- :func:`calculate_body_fat` is the QingNiu body-fat algorithm (weight,
+  height, age, sex, impedance). The QN extended flavor computes body fat
+  on-device; other flavors — and the broadcast ``0xaabb`` variant, which
+  sends no impedance at all — compute it off-scale by calling this
+  function (the broadcast variant with a fixed synthetic impedance; see
+  the README).
+- :class:`BodyMetrics` takes a body-fat percentage and derives the
+  remaining metrics (BMI, fat-free mass, water, skeletal muscle, bone,
+  muscle, protein, BMR) from it.
 """
 
 from __future__ import annotations

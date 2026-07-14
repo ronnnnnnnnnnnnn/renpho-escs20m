@@ -10,7 +10,7 @@ from .const import (
 )
 from .data import BluetoothScanningMode, ScaleData, WeightUnit
 from .qn import RenphoQNScale
-from .qn.body_metrics import BodyMetrics, Sex, calculate_body_fat
+from .body_metrics import BodyMetrics, Sex, calculate_body_fat
 from .qn.protocol import Profile, ProfileResolver, build_user_profile_command
 from .scale import AdvertisementScale, GattScale, RenphoScale
 from .detection import (
