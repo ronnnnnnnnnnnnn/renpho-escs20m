@@ -40,6 +40,8 @@ from .protocol import (
     _MEASUREMENT_STATUS_STABLE,
     _MEASUREMENT_STATUS_STABLE_WITH_METRICS,
     _MEASUREMENT_STATUS_UNSTABLE,
+    _OP_EXTENDED_METRICS_1,
+    _OP_EXTENDED_METRICS_2,
     _OP_MEAS_INIT_REQUEST,
     _OP_MEASUREMENT,
     _OP_PRE_MEASUREMENT,
@@ -298,12 +300,28 @@ class RenphoQNScale(GattScale):
                 self._handle_extended_pre_measurement(address)
             else:
                 self._handle_basic_pre_measurement(address)
-        elif opcode == _OP_MEASUREMENT and length == _LEN_EXTENDED_MEASUREMENT:
+        elif opcode == _OP_MEASUREMENT and length >= _LEN_EXTENDED_MEASUREMENT:
+            # >= rather than == : a Renpho R-MSB01 (FCC 2A26P-RMSB01, a later
+            # hardware revision of the same CS20 platform as ES-CS20M) sends
+            # a confirmed 15-byte extended frame instead of 14. Front fields
+            # (guest_id@3, status@4, weight@5:7) are identical; see
+            # parse_extended_measurement's docstring for what this does and
+            # doesn't validate about the trailing metrics fields.
             self._handle_extended_measurement(payload, name, address)
         elif opcode == _OP_MEASUREMENT and length == _LEN_BASIC_MEASUREMENT:
             self._handle_basic_measurement(payload, name, address)
         elif opcode == _OP_STORED_MEASUREMENT:
             self._handle_stored_measurement(payload, address)
+        elif opcode in (_OP_EXTENDED_METRICS_1, _OP_EXTENDED_METRICS_2):
+            # Not decoded — see the constant definitions in protocol.py.
+            # Logged distinctly so a future capture is easy to find.
+            self._logger.debug(
+                "ES-CS20M R-MSB01 extended-metrics frame (opcode 0x%02x, not "
+                "yet decoded) from %s: %s",
+                opcode,
+                address,
+                payload.hex(),
+            )
         elif opcode == _OP_PROFILE_ACK:
             # Extended-flavor ack of our user-profile command; the only
             # follow-up is the optional stored-measurement query, which the
@@ -490,7 +508,8 @@ class RenphoQNScale(GattScale):
     def _handle_extended_measurement(
         self, payload: bytearray, name: str, address: str
     ) -> None:
-        """Handle an extended-flavor measurement broadcast (``10 0e``, 14 bytes)."""
+        """Handle an extended-flavor measurement broadcast (``10 0e``, 14 bytes
+        on ES-CS20M; a Renpho R-MSB01 sends 15 — see parse_extended_measurement)."""
         if len(payload) < _LEN_EXTENDED_MEASUREMENT:
             self._logger.debug(
                 "ES-CS20M measurement frame from %s too short (%d bytes): %s",

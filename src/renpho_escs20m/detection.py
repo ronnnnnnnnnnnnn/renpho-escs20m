@@ -122,6 +122,11 @@ FALLBACK_MATCHERS: list[tuple[ScaleProtocol, str]] = [
     (ScaleProtocol.QN, "QN-Scale*"),
     (ScaleProtocol.QN, "FF:03:00:*"),
     (ScaleProtocol.QN, "FF:04:00:*"),
+    # Renpho R-MSB01 (FCC 2A26P-RMSB01 / originally 2ANDX-CS20W). Already
+    # covered by the "Renpho-Scale*" name match above on the one confirmed
+    # unit, but a name-independent address match is cheap insurance against
+    # a firmware variant that doesn't advertise that name.
+    (ScaleProtocol.QN, "FF:05:00:*"),
 ]
 
 

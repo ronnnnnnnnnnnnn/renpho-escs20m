@@ -288,6 +288,63 @@ def test_parse_extended_measurement_status_2_with_zero_bf_skips_body_fat():
     assert out.resistance_2 == 500
 
 
+# --- R-MSB01 variant --------------------------------------------------------
+# Renpho R-MSB01 (FCC 2A26P-RMSB01, originally granted as 2ANDX-CS20W — a
+# later hardware revision of the same CS20 platform). Sends a 15-byte
+# extended frame instead of 14: front fields (guest_id@3, status@4,
+# weight@5:7) and the resistance/body-fat block (payload[7:9]/[9:11]/[11:13])
+# are identical to ES-CS20M; the extra byte is a trailing pad between
+# body_fat and the checksum. Frames below are real, captured from hardware.
+# Both independently decode to the same body_fat (32.8%), from two separate
+# weigh-ins in the same session.
+
+
+def test_parse_extended_measurement_rmsb01_15_byte_frame_first_capture():
+    """Real R-MSB01 status=2 frame: weight 106.50 kg, r1=4335, r2=4333, bf 32.8%."""
+    payload = bytearray.fromhex("100ffffe02299a10ef10ed01480026")
+    out = parse_extended_measurement(payload)
+    assert out.weight_kg == 106.50
+    assert out.status == 2
+    assert out.body_fat == 32.8
+    assert out.resistance_1 == 4335
+    assert out.resistance_2 == 4333
+
+
+def test_parse_extended_measurement_rmsb01_15_byte_frame_second_capture():
+    """Second real R-MSB01 status=2 frame, same session: same weight and
+    body_fat as the first capture, resistance varies slightly between
+    the two independent BIA passes — as expected for repeat measurements."""
+    payload = bytearray.fromhex("100ffffe02299a10fe10fc01480044")
+    out = parse_extended_measurement(payload)
+    assert out.weight_kg == 106.50
+    assert out.status == 2
+    assert out.body_fat == 32.8
+    assert out.resistance_1 == 4350
+    assert out.resistance_2 == 4348
+
+
+@pytest.mark.asyncio
+async def test_handle_extended_measurement_accepts_15_byte_rmsb01_frame():
+    """The dispatch-level length check (`>=` not `==`) must not drop a
+    15-byte frame — this is the actual bug fixed: R-MSB01 frames were
+    previously logged as 'ignoring unrecognized payload' and silently
+    discarded."""
+    scale, callback = _make_scale()
+    scale._safe_write = AsyncMock()
+
+    scale._handle_extended_measurement(
+        bytearray.fromhex("100ffffe02299a10ef10ed01480026"),
+        "Renpho-Scale",
+        "FF:05:00:0A:FB:27",
+    )
+    await asyncio.sleep(0)
+    assert callback.call_count == 1
+    data = callback.call_args[0][0]
+    assert data.measurements[WEIGHT_KEY] == 106.50
+    assert data.measurements[RESISTANCE_1_KEY] == 4335
+    assert data.measurements[RESISTANCE_2_KEY] == 4333
+
+
 # --- ESCS20MN variant -----------------------------------------------------
 # Frames below are real, captured from ESCS20MN hardware.
 
