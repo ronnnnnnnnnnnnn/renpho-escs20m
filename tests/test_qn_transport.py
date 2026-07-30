@@ -1,6 +1,7 @@
-"""Tests for the QN dual-GATT-transport support.
+"""Tests for the QN GATT-transport support.
 
-QN-Scale hardware ships two GATT transports for the same wire protocol:
+QN-Scale hardware ships three GATT transports for otherwise-related wire
+protocols:
 
 - FFF0 service: FFF1 notify / FFF2 write — the renpho ES-CS20M transport,
   verified on hardware.
@@ -9,9 +10,16 @@ QN-Scale hardware ships two GATT transports for the same wire protocol:
   pre-measurement and stored-record frames arrive as indications on FFE2,
   and captured sessions split the writes: set-time (0x20) and stored-query
   (0x22) go to FFE4, everything else to FFE3.
+- A custom 0x1a10 service, notify-only on 0x2a10 — the Renpho R-A012/R-A020
+  "Body Fat Scale" line. Unlike the two transports above, it speaks a
+  wire format with no shared opcode/length framing (no vendor SDK or
+  protocol doc was available; see qn/protocol.py:parse_legacy_measurement
+  for how it was reverse-engineered from a live device).
 
-The frame hex in the replay test is taken verbatim from the btsnoop
-capture attached to issue #5 (Arboleaf CS20M, vendor byte 0x15).
+The frame hex in the FFE0 replay test is taken verbatim from the btsnoop
+capture attached to issue #5 (Arboleaf CS20M, vendor byte 0x15). The frame
+hex in the legacy replay test is taken verbatim from a live capture against
+a Renpho R-A012.
 """
 
 from __future__ import annotations
@@ -28,6 +36,7 @@ from renpho_escs20m.const import (
     FFE0_COMMAND_CHARACTERISTIC_UUID,
     FFE0_INDICATE_CHARACTERISTIC_UUID,
     FFE0_NOTIFY_CHARACTERISTIC_UUID,
+    LEGACY_NOTIFY_CHARACTERISTIC_UUID,
     NOTIFY_CHARACTERISTIC_UUID,
 )
 from renpho_escs20m.data import WeightUnit
@@ -43,6 +52,7 @@ _FFE0_CHARS = frozenset(
         FFE0_ALT_COMMAND_CHARACTERISTIC_UUID,
     }
 )
+_LEGACY_CHARS = frozenset({LEGACY_NOTIFY_CHARACTERISTIC_UUID})
 
 
 def _make_scale(**kwargs) -> tuple[RenphoQNScale, MagicMock]:
@@ -127,6 +137,27 @@ async def test_session_setup_ffe0_without_ffe2_still_subscribes_ffe1():
     )
     await _run_session_setup(scale, client)
     assert _subscribed_chars(client) == [client.chars[FFE0_NOTIFY_CHARACTERISTIC_UUID]]
+
+
+@pytest.mark.asyncio
+async def test_session_setup_falls_back_to_legacy_transport():
+    scale, _ = _make_scale()
+    client = _make_client(_LEGACY_CHARS)
+    await _run_session_setup(scale, client)
+    assert _subscribed_chars(client) == [
+        client.chars[LEGACY_NOTIFY_CHARACTERISTIC_UUID]
+    ]
+
+
+@pytest.mark.asyncio
+async def test_session_setup_prefers_fff0_and_ffe0_over_legacy():
+    scale, _ = _make_scale()
+    client = _make_client(_FFE0_CHARS | _LEGACY_CHARS)
+    await _run_session_setup(scale, client)
+    assert _subscribed_chars(client) == [
+        client.chars[FFE0_NOTIFY_CHARACTERISTIC_UUID],
+        client.chars[FFE0_INDICATE_CHARACTERISTIC_UUID],
+    ]
 
 
 @pytest.mark.asyncio
@@ -260,3 +291,43 @@ async def test_arboleaf_capture_replay_over_ffe0_transport():
     assert data.measurements["weight"] == 72.70
     assert data.measurements["resistance_1"] == 506
     assert data.measurements["resistance_2"] == 494
+
+
+# ---- legacy (R-A012/R-A020) transport --------------------------------------
+
+# Verbatim notification bytes from a live capture against a Renpho R-A012,
+# in the order they arrived: an initial status frame, a burst of settling
+# frames (weight already present but status 0x00), then the stable frame
+# repeated 3x (status 0x01, hardware-observed pattern). The bare status
+# frame and the fixed non-55aa frame observed interleaved with these are
+# included to verify they're ignored rather than mis-parsed.
+_LEGACY_CAPTURE_RX = [
+    "55aa1100050001010a0021",
+    "55aa1100050101010a0022",
+    "20a4200020102c002000000000",
+    "55aa1400070000001b2b000060",
+    "55aa1400070000001b2b000060",
+    "55aa1400070100001b2b02a609",
+    "55aa1400070100001b2b02a609",
+    "55aa1400070100001b2b02a609",
+]
+
+
+@pytest.mark.asyncio
+async def test_ra012_capture_replay_over_legacy_transport():
+    scale, callback = _make_scale()
+    client = _make_client(_LEGACY_CHARS)
+    await _run_session_setup(scale, client)
+
+    for hx in _LEGACY_CAPTURE_RX:
+        scale._legacy_notification_handler(
+            bytearray(bytes.fromhex(hx)), "R-A012", ADDRESS
+        )
+
+    # No writes on this transport -- it streams on its own.
+    client.write_gatt_char.assert_not_awaited()
+
+    # Despite three stable frames in the capture, the callback fires once.
+    callback.assert_called_once()
+    data = callback.call_args[0][0]
+    assert data.measurements == {"weight": 69.55}

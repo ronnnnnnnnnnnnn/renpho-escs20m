@@ -63,6 +63,16 @@ _BASIC_STATUS_SETTLING = 0x00  # weight not yet committed, no impedance
 _BASIC_STATUS_BIA_RUNNING = 0x11  # weight committed, BIA pass in progress
 _BASIC_STATUS_FINAL = 0x01  # BIA done, impedance present
 
+# Legacy-flavor (R-A012/R-A020) measurement frame markers. Unlike the
+# extended/basic flavors above, this transport has no shared opcode/length
+# framing -- frames are identified by a fixed 2-byte sync word instead.
+_LEGACY_SYNC = b"\x55\xaa"
+_LEGACY_MEASUREMENT_TYPE = 0x14  # byte 2 of measurement frames specifically
+_LEGACY_MEASUREMENT_OPCODE = 0x07  # byte 4
+_LEGACY_STATUS_SETTLING = 0x00  # byte 5
+_LEGACY_STATUS_STABLE = 0x01  # byte 5
+_LEN_LEGACY_MEASUREMENT = 13
+
 # Guest-mode sentinels for bytes 3-5 of the user-profile frame. The scale
 # recognizes the session as ephemeral (no slot allocated, nothing stored),
 # so the library coexists safely with the official Renpho app.
@@ -580,4 +590,52 @@ def parse_metrics_panel_b(payload: bytearray, weight_kg: float) -> _MetricsPanel
         skeletal_muscle=round(int.from_bytes(payload[10:12], "big") / 10, 1),
         body_score=round(int.from_bytes(payload[12:14], "big") / 10, 1),
         body_shape=payload[14],
+    )
+
+
+class _LegacyFrame(NamedTuple):
+    """Decoded legacy-flavor (R-A012/R-A020) measurement frame fields."""
+
+    weight_kg: float
+    status: int
+    secondary: int
+
+
+def parse_legacy_measurement(payload: bytearray) -> _LegacyFrame:
+    """Decode a legacy-flavor measurement frame (``55 aa 14 00 07``, 13 bytes).
+
+    Reverse-engineered from a live Renpho R-A012 (no vendor SDK or protocol
+    doc was available); layout::
+
+        0..1   sync 55 aa
+        2      0x14 -- frame-type marker, *not* a length count (the frame
+               is 13 bytes; nothing in the capture matches len=0x14=20)
+        3      0x00 (always zero in captures)
+        4      0x07 -- measurement opcode
+        5      status: 0x00 settling, 0x01 stable
+        6..7   0x00 0x00 (always zero in captures; unidentified)
+        8..9   weight, big-endian uint16, 0.01 kg
+        10..11 secondary metric, big-endian uint16 -- zero while settling,
+               populated on the stable frame only. Likely raw BIA impedance
+               by analogy with the resistance fields on the other two QN
+               transports, but this is *unconfirmed*: no profile/body-fat
+               exchange has been observed on this transport, so it is
+               deliberately not surfaced as resistance_1/resistance_2.
+               Treat as opaque until confirmed against a second device.
+        12     checksum (unvalidated -- not a simple sum of bytes 0-11 mod
+               256; the exact algorithm hasn't been determined)
+
+    The scale also emits two other frame shapes on this same
+    characteristic during a session: an 11-byte ``55 aa 11 00 05`` frame
+    (status/keepalive, doesn't vary with weight) and a fixed 13-byte
+    ``20 a4 20 00 20 10 2c 00 20 00 00 00 00`` frame (also constant across
+    captures). Neither reaches this parser -- the caller matches on the
+    sync word + type + opcode bytes checked above before calling in, and
+    silently ignores anything else, mirroring how the basic/extended
+    flavors ignore frames they don't recognize.
+    """
+    return _LegacyFrame(
+        weight_kg=round(int.from_bytes(payload[8:10], "big") / 100, 2),
+        status=payload[5],
+        secondary=int.from_bytes(payload[10:12], "big"),
     )

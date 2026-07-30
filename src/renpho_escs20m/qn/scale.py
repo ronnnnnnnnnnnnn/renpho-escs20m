@@ -26,6 +26,7 @@ from ..const import (
     FFE0_COMMAND_CHARACTERISTIC_UUID,
     FFE0_INDICATE_CHARACTERISTIC_UUID,
     FFE0_NOTIFY_CHARACTERISTIC_UUID,
+    LEGACY_NOTIFY_CHARACTERISTIC_UUID,
     MUSCLE_MASS_KEY,
     NOTIFY_CHARACTERISTIC_UUID,
     PROTEIN_KEY,
@@ -48,10 +49,15 @@ from .protocol import (
     _BOOTSTRAP_PROFILE,
     _DEFAULT_VENDOR_BYTE,
     _GUEST_USER_ID,
+    _LEGACY_MEASUREMENT_OPCODE,
+    _LEGACY_MEASUREMENT_TYPE,
+    _LEGACY_STATUS_STABLE,
+    _LEGACY_SYNC,
     _LEN_BASIC_MEASUREMENT,
     _LEN_EXTENDED_MEASUREMENT,
     _LEN_EXTENDED_MEASUREMENT_LONG,
     _LEN_EXTENDED_PRE_MEASUREMENT,
+    _LEN_LEGACY_MEASUREMENT,
     _LEN_METRICS_PANEL,
     _LEN_STORED_MEASUREMENT,
     _MEASUREMENT_STATUS_STABLE,
@@ -78,6 +84,7 @@ from .protocol import (
     parse_metrics_panel_a,
     parse_metrics_panel_b,
     parse_extended_stored_measurement,
+    parse_legacy_measurement,
     parse_stored_measurement,
 )
 
@@ -93,6 +100,10 @@ _STATE_STORED_QUERY = 32
 # Set once this session has warned about metrics frames from a model not
 # registered as a panel-sender, so the warning fires once, not per frame.
 _STATE_METRICS_WARNED = 64
+# Set once the legacy-flavor stable measurement frame has been handled, so
+# a repeated stable frame (observed 2-3x per session on hardware) does not
+# fire the callback more than once.
+_STATE_LEGACY_FINAL = 128
 
 # On the FFE0 transport command writes are split across two characteristics
 # (capture-verified): set-time (0x20) and the stored-measurement query
@@ -267,7 +278,11 @@ class RenphoQNScale(GattScale):
                 )
 
             # Prefer the FFF0 transport (renpho ES-CS20M), then fall back to
-            # the FFE0 transport (e.g. Arboleaf CS20M).
+            # the FFE0 transport (e.g. Arboleaf CS20M), then the legacy
+            # transport (Renpho R-A012/R-A020 "Body Fat Scale" line). The
+            # legacy transport speaks a wire format with nothing in common
+            # with the other two, so it gets its own handler rather than
+            # going through the shared opcode-dispatch `handler` above.
             if weight_char := client.services.get_characteristic(
                 NOTIFY_CHARACTERISTIC_UUID
             ):
@@ -282,6 +297,17 @@ class RenphoQNScale(GattScale):
                     FFE0_INDICATE_CHARACTERISTIC_UUID
                 ):
                     await client.start_notify(indicate_char, handler)
+            elif weight_char := client.services.get_characteristic(
+                LEGACY_NOTIFY_CHARACTERISTIC_UUID
+            ):
+                def legacy_handler(
+                    char: BleakGATTCharacteristic, data: bytearray
+                ) -> None:
+                    self._legacy_notification_handler(
+                        data, ble_device.name, ble_device.address
+                    )
+
+                await client.start_notify(weight_char, legacy_handler)
             else:
                 self._logger.error("ES-CS20M notification characteristic not found")
                 return
@@ -903,6 +929,71 @@ class RenphoQNScale(GattScale):
                 address=address,
                 display_unit=self.display_unit,
                 measurements=data,
+            )
+        )
+
+    def _legacy_notification_handler(
+        self, payload: bytearray, name: str, address: str
+    ) -> None:
+        """Handle a legacy-flavor notification (Renpho R-A012/R-A020).
+
+        This transport has no opcode/length framing shared with the
+        extended/basic flavors, so it is not routed through
+        ``_notification_handler`` -- it gets a dedicated dispatch on the
+        sync word (``55 aa``) plus the measurement-frame type/opcode bytes.
+        Anything else on this characteristic (the 11-byte status/keepalive
+        frame and the fixed non-``55aa`` frame observed alongside it, see
+        ``parse_legacy_measurement``) is silently ignored, matching how the
+        other flavors handle frames they don't recognize.
+        """
+        if (
+            len(payload) < _LEN_LEGACY_MEASUREMENT
+            or payload[0:2] != _LEGACY_SYNC
+            or payload[2] != _LEGACY_MEASUREMENT_TYPE
+            or payload[4] != _LEGACY_MEASUREMENT_OPCODE
+        ):
+            self._logger.debug(
+                "QN legacy-flavor ignoring unrecognized payload from %s: %s",
+                address,
+                payload.hex(),
+            )
+            return
+
+        frame = parse_legacy_measurement(payload)
+
+        if frame.status != _LEGACY_STATUS_STABLE:
+            self._logger.debug(
+                "QN legacy-flavor settling frame from %s: weight=%.2f kg",
+                address,
+                frame.weight_kg,
+            )
+            return
+
+        # Stable frame. The scale repeats it 2-3x per session on hardware;
+        # guard against firing the callback more than once per connection.
+        if self._state_mask & _STATE_LEGACY_FINAL:
+            self._logger.debug(
+                "QN legacy-flavor duplicate stable frame from %s; already "
+                "handled, ignoring: %s",
+                address,
+                payload.hex(),
+            )
+            return
+        self._state_mask |= _STATE_LEGACY_FINAL
+
+        self._logger.debug(
+            "QN legacy-flavor stable measurement from %s: weight=%.2f kg "
+            "(secondary=%d, meaning unconfirmed). Firing callback.",
+            address,
+            frame.weight_kg,
+            frame.secondary,
+        )
+        self._notification_callback(
+            ScaleData(
+                name=name,
+                address=address,
+                display_unit=self.display_unit,
+                measurements={WEIGHT_KEY: frame.weight_kg},
             )
         )
 

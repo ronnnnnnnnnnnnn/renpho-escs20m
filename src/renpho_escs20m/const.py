@@ -13,6 +13,17 @@ FFE0_INDICATE_CHARACTERISTIC_UUID = "0000ffe2-0000-1000-8000-00805f9b34fb"
 FFE0_COMMAND_CHARACTERISTIC_UUID = "0000ffe3-0000-1000-8000-00805f9b34fb"
 FFE0_ALT_COMMAND_CHARACTERISTIC_UUID = "0000ffe4-0000-1000-8000-00805f9b34fb"
 
+# A third, older QN transport seen on the Renpho R-A012/R-A020 "Body Fat
+# Scale" line (not the ES-CS20M/Elis line the two transports above target):
+# a single custom service whose 16-bit UUID alias (0x1a10) matches the
+# company ID in this scale's BLE advertisement manufacturer data. It speaks
+# a distinct, undocumented wire format with no opcode/length framing in
+# common with FFF0/FFE0 -- see qn/protocol.py:parse_legacy_measurement.
+# Hardware-verified on one R-A012 unit; no write/command characteristic use
+# has been identified, so only the notify UUID is defined here.
+LEGACY_SERVICE_UUID = "00001a10-0000-1000-8000-00805f9b34fb"
+LEGACY_NOTIFY_CHARACTERISTIC_UUID = "00002a10-0000-1000-8000-00805f9b34fb"
+
 # Standard BLE SIG characteristics on the scale's Device Information services.
 BATTERY_LEVEL_CHARACTERISTIC_UUID = "00002a19-0000-1000-8000-00805f9b34fb"
 FIRMWARE_REVISION_CHARACTERISTIC_UUID = "00002a26-0000-1000-8000-00805f9b34fb"
@@ -49,6 +60,8 @@ __all__ = [
     "FFE0_INDICATE_CHARACTERISTIC_UUID",
     "FFE0_COMMAND_CHARACTERISTIC_UUID",
     "FFE0_ALT_COMMAND_CHARACTERISTIC_UUID",
+    "LEGACY_SERVICE_UUID",
+    "LEGACY_NOTIFY_CHARACTERISTIC_UUID",
     "BATTERY_LEVEL_CHARACTERISTIC_UUID",
     "FIRMWARE_REVISION_CHARACTERISTIC_UUID",
     "WEIGHT_KEY",
