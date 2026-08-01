@@ -8,8 +8,9 @@
 This package provides an unofficial interface for interacting with
 Renpho's ES-CS20M scale (and other scales that share the same
 QN-series protocol, including some non-Renpho ones) over Bluetooth Low
-Energy. It also has experimental, weight-only support for a
-broadcast-only ES-CS20M subvariant that speaks a different protocol.
+Energy. It also supports the `0x55aa` ES-CS20M subvariant built on LeFu
+hardware, and has experimental, weight-only support for a broadcast-only
+ES-CS20M subvariant that speaks a third protocol.
 See the [Device compatibility](#device-compatibility) section for the
 current list of confirmed-working models.
 
@@ -31,6 +32,7 @@ current list of confirmed-working models.
 - Guest-mode protocol — coexists safely with users registered by the official Renpho app on the same scale.
 - Three modes: fixed-user (with `Profile`), user-detection (with async resolver), and weight-only.
 - `BodyMetrics` derives 9 body-composition metrics from a stable reading: BMI, fat-free mass, body water %, skeletal muscle %, muscle mass, bone mass, protein %, BMR, and a body fat % passthrough.
+- Weight and impedance from the `0x55aa` ES-CS20M subvariant (LeFu hardware) via `Renpho55AAScale`; body fat is computed off-scale with `calculate_body_fat()`.
 - **Experimental:** weight-only support for the broadcast-only ES-CS20M subvariant via `RenphoAABBScale` (no body composition — see [Device compatibility](#device-compatibility)).
 
 ## Installation
@@ -52,6 +54,7 @@ depends on which one its hardware uses:
 | Protocol   | Transport | Status          | Features |
 |------------|-----------|-----------------|----------|
 | QN-series  | GATT      | ✅ Supported     | Weight, impedance, body-composition metrics, display-unit control |
+| `0x55aa`   | GATT      | ✅ Supported     | Weight, impedance (no display-unit control) |
 | `0xaabb`   | Broadcast | 🔬 Experimental  | Weight only (display unit observed, not settable) |
 
 ### Identifying your scale
@@ -79,6 +82,12 @@ Confirmed-working (QN-series):
 | ES-30M         | `ES30MA2`   | `2A26P-ES30MA2`   |
 | ES-32MD        | `ESCS20MA2` | `2A26P-ESCS20MA2` |
 
+Confirmed-working (`0x55aa`):
+
+| Marketed model | HVIN         | FCC ID              |
+|----------------|--------------|---------------------|
+| ES-CS20M       | `ES-CS20MB1` | `2A26P-ESCS20MB1`   |
+
 Experimental:
 
 | Marketed model | HVIN | FCC ID            | Protocol               |
@@ -98,7 +107,14 @@ Experimental:
   composition calculations see [Broadcast variant](#broadcast-variant)).
   The display unit can be observed but not set.
 
-Known-incompatible — `0x55aa` (not yet supported):
+- **ES-CS20M (HVIN `ES-CS20MB1`)** — LeFu hardware, not Qingniu. It
+  advertises under its own vendor company ID (`0x1A10`) and exposes vendor
+  GATT service `0x1A10` (`0x2A10` notify, `0x2A11` write) rather than the
+  QN FFF0/FFE0 layout. Supported via `Renpho55AAScale`: weight plus raw
+  impedance, no on-device body composition, no display-unit control. See
+  [0x55aa variant](#0x55aa-variant).
+
+Untested — `0x55aa` variants not yet confirmed:
 
 | Marketed model | HVIN        | FCC ID            | Protocol (first payload bytes) |
 |----------------|-------------|-------------------|--------------------------------|
@@ -106,10 +122,12 @@ Known-incompatible — `0x55aa` (not yet supported):
 | ES-26BB-B      | `ES26BBB`   | ?                 | `0x55aa` (basic flavor)        |
 
 The **Protocol** column records the first bytes of the notification frames
-each unsupported variant emits — a rough fingerprint of the (different) BLE
-protocol it speaks, kept for reference and possible future support work.
+each variant emits. Both share the `0x55aa` framing that `Renpho55AAScale`
+now implements, but their payload layouts were reported before the protocol
+was decoded and have not been checked against it. Try `Renpho55AAScale` on
+them and report the result.
 
-The pattern so far: marketed model name is unreliable, but the HVIN — and specifically its revision suffix (`A2`, `B2`, `N`…) — tracks the actual hardware and apparently also the protocol. If your Renpho scale HVIN ends in `A2` or `N`, this library will likely work with it; if it ends in some other suffix, try it out to see if it works and report back on the issue tracker.
+The pattern so far: marketed model name is unreliable, but the HVIN — and specifically its revision suffix (`A2`, `B1`, `B2`, `N`…) — tracks the actual hardware and apparently also the protocol. `A2` and `N` are QN-series; `B1` is LeFu `0x55aa`. If your HVIN ends in some other suffix, try both classes and report back on the issue tracker.
 
 > This library may also work with other QN-Scale varieties utilizing the same protocol (on either GATT layout), including non-Renpho ones. Feel free to report compatibility results on the issue tracker.
 
@@ -269,6 +287,60 @@ the bootstrap profile (no body fat) before your resolved profile
 lands. If the BLE session ends while the resolver is still in flight,
 the library cancels the resolver task to avoid leaking work.
 
+### 0x55aa variant
+
+The `0x55aa` subvariant (LeFu hardware, HVIN `ES-CS20MB1`) uses
+`Renpho55AAScale`. No `Profile`, no unit control; the scale reports weight
+and raw impedance, and body fat is computed off-scale:
+
+```python
+import asyncio
+from renpho_escs20m import (
+    RESISTANCE_1_KEY, BodyMetrics, Renpho55AAScale, ScaleData, Sex,
+    WEIGHT_KEY, calculate_body_fat,
+)
+
+HEIGHT_M, AGE, SEX = 1.70, 35, Sex.Male
+
+
+def notification_callback(data: ScaleData):
+    weight = data.measurements[WEIGHT_KEY]
+    resistance = data.measurements.get(RESISTANCE_1_KEY)
+    if resistance is None:
+        print(f"weight={weight} kg (no impedance)")
+        return
+    body_fat = calculate_body_fat(
+        weight_kg=weight, height_m=HEIGHT_M, age=AGE, sex=SEX,
+        resistance=int(resistance), algorithm=0x03,
+    )
+    m = BodyMetrics(
+        weight_kg=weight, height_m=HEIGHT_M, age=AGE, sex=SEX,
+        body_fat_percentage=body_fat,
+    )
+    print(f"weight={weight} kg  bf%={m.body_fat_percentage}  bmr={m.basal_metabolic_rate}")
+
+
+async def main():
+    scale = Renpho55AAScale('XX:XX:XX:XX:XX:XX', notification_callback)
+    await scale.async_start()
+    await asyncio.sleep(60)
+    await scale.async_stop()
+
+
+asyncio.run(main())
+```
+
+The scale emits several stable frames per weigh-in as the reading converges,
+and reports impedance only after a bioimpedance pass that runs seconds later,
+following a pause in the notification stream. The client therefore
+accumulates a whole weigh-in and fires the callback once, with the settled
+weight and the impedance if one arrived. A weigh-in that never produces
+impedance is reported weight-only after `impedance_wait_seconds`.
+
+`algorithm=0x03` above is not the library default. Renpho selects between
+`0x03` and `0x04` by region; cross-check against the official app and pick
+the one that matches.
+
 ### Broadcast variant
 
 The broadcast-only `0xaabb` subvariant uses a different client,
@@ -308,7 +380,8 @@ matters, and ~500 reproduces pretty closely what the official Renpho app shows.
 
 `detect_protocol()` classifies a BLE advertisement (local name,
 manufacturer data, and address) as `ScaleProtocol.QN`,
-`ScaleProtocol.AABB`, or `None` if it isn't a recognized scale. Pair it
+`ScaleProtocol.AABB`, `ScaleProtocol.X55AA`, or `None` if it isn't a
+recognized scale. Pair it
 with `SCALE_CLASSES` to pick the right client class without hardcoding
 `if`/`else` branches:
 
@@ -327,6 +400,10 @@ Frame layouts (manufacturer-data value, company ID already stripped):
   advertisement; `[5:11]` device MAC address, little-endian.
 - AABB: `[0:2]` `0xAABB` magic; `[2:8]` device MAC address, forward byte
   order; `[8:]` protocol payload.
+- X55AA: company ID `0x1A10`, not `0xFFFF`. `[0:4]` fixed prefix
+  (`00 04 00 03` observed); `[4:10]` device MAC address, forward byte order;
+  `[10:]` trailing bytes (`01 01` observed). Measurements arrive over GATT,
+  not in the advertisement.
 
 Known QN model identifiers, observed in real advertisement captures:
 
@@ -408,6 +485,32 @@ identifier registry grows.
 - `BluetoothScanningMode` — `ACTIVE` (default) / `PASSIVE`, passed via
   the `scanning_mode` kwarg. `PASSIVE` only takes effect on Linux
   (BlueZ); other platforms fall back to active.
+
+### 0x55aa variant
+
+- `Renpho55AAScale(address, callback, display_unit=WeightUnit.KG, *,
+  settle_seconds=2.5, impedance_wait_seconds=10.0, send_hello=True,
+  scanning_mode=…, adapter=…, cooldown_seconds=…, max_connect_attempts=…,
+  bleak_scanner_backend=…, logger=…)` — client for the `0x55aa` variant
+  (LeFu hardware). Differences from `RenphoQNScale`:
+  - One callback per weigh-in, fired once the notification stream goes
+    quiet. `settle_seconds` is the quiet period once an impedance reading
+    has arrived; `impedance_wait_seconds` is how long to keep waiting for
+    one before reporting weight-only.
+  - `ScaleData.measurements` contains `WEIGHT_KEY`, plus `RESISTANCE_1_KEY`
+    and `RESISTANCE_2_KEY` when the bioimpedance pass reported them. Never
+    `BODY_FAT_KEY`: this scale computes no body composition, so use
+    `calculate_body_fat()` with `RESISTANCE_1_KEY`.
+  - No `profile`. The scale never requests one.
+  - `display_unit` reflects the wire format, always kilograms. Assigning it
+    is ignored: the protocol has no unit command.
+  - `send_hello=False` skips the write to `0x2A11` made after subscribing.
+  - `battery_level` and `firmware_revision` work as on `RenphoQNScale`.
+
+  Only `RESISTANCE_1_KEY` is a confirmed impedance value. `RESISTANCE_2_KEY`
+  carries a second field from the live frames that was observed converging
+  as the reading settled; it is passed through unvalidated, so do not feed
+  it to `calculate_body_fat()`.
 
 ### Broadcast variant (experimental)
 

@@ -1,6 +1,7 @@
 """Renpho BLE scale client."""
 
 from ._version import __version__, __version_info__
+from .x55aa import Renpho55AAScale
 from .xaabb import RenphoAABBScale
 from .const import (
     BODY_FAT_KEY,
@@ -20,6 +21,7 @@ from .detection import (
     detect_protocol,
     is_aabb_frame,
     is_qn_frame,
+    is_x55aa_frame,
     parse_qn_model_code,
 )
 
@@ -32,6 +34,7 @@ RenphoESCS20MScale = RenphoQNScale
 SCALE_CLASSES: dict[ScaleProtocol, type[RenphoScale]] = {
     ScaleProtocol.QN: RenphoQNScale,
     ScaleProtocol.AABB: RenphoAABBScale,
+    ScaleProtocol.X55AA: Renpho55AAScale,
 }
 
 __all__ = [
@@ -43,6 +46,7 @@ __all__ = [
     "RenphoQNScale",
     "RenphoESCS20MScale",
     "RenphoAABBScale",
+    "Renpho55AAScale",
     "Profile",
     "ProfileResolver",
     "BluetoothScanningMode",
@@ -63,5 +67,6 @@ __all__ = [
     "detect_protocol",
     "is_aabb_frame",
     "is_qn_frame",
+    "is_x55aa_frame",
     "parse_qn_model_code",
 ]

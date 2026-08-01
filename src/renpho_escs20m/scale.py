@@ -3,12 +3,12 @@
 - :class:`RenphoScale` — transport-agnostic: BLE scanner setup + lifecycle,
   address filtering, and the notification callback.
 - :class:`GattScale` — variants that deliver measurements over a GATT
-  connection (QN / ES-CS20M, and future 0x55aa / ES-26).
+  connection (QN / ES-CS20M, and 0x55aa / LeFu).
 - :class:`AdvertisementScale` — variants that broadcast measurements in their
   BLE advertisements with no connection (0xaabb).
 
 Protocol-specific handling lives in the per-protocol subpackages
-(``qn/``, ``xaabb/``).
+(``qn/``, ``x55aa/``, ``xaabb/``).
 """
 
 from __future__ import annotations
