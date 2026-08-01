@@ -12,8 +12,16 @@ AABB broadcast frame (company IDs in :data:`AABB_COMPANY_IDS`)::
     [2:8]  device MAC address, forward byte order
     [8:]   protocol payload (see ``xaabb.protocol``)
 
-Both frame families ride the same generic 0xFFFF (65535) company ID — QN
-and AABB are disambiguated by the 0xAABB magic prefix, not by company ID.
+0x55aa frame (company IDs in :data:`X55AA_COMPANY_IDS`)::
+
+    [0:4]  fixed prefix, 00 04 00 03 observed
+    [4:10] device MAC address, forward byte order
+    [10:]  trailing bytes, 01 01 observed
+
+Those two frame families ride the same generic 0xFFFF (65535) company ID — QN
+and AABB are disambiguated by the 0xAABB magic prefix, not by company ID. The
+0x55aa variant advertises under its own vendor company ID instead, and carries
+its measurements over GATT rather than in the advertisement.
 
 Company ID 65535 is a catch-all used by many vendors, so for QN frames the
 embedded MAC is validated against the device address before the identifier
@@ -28,6 +36,8 @@ import fnmatch
 import logging
 from enum import StrEnum
 
+from .x55aa.protocol import SUPPORTED_COMPANY_IDS as X55AA_COMPANY_IDS
+from .x55aa.protocol import is_advertisement as _is_x55aa_advertisement
 from .xaabb.protocol import SUPPORTED_COMPANY_IDS as AABB_COMPANY_IDS
 
 _LOGGER = logging.getLogger(__name__)
@@ -45,6 +55,7 @@ class ScaleProtocol(StrEnum):
 
     QN = "qn"
     AABB = "aabb"
+    X55AA = "x55aa"
 
 
 def _mac_bytes(address: str) -> bytes | None:
@@ -82,6 +93,15 @@ def is_qn_frame(payload: bytes, address: str | None = None) -> bool:
         if mac is not None and payload[_QN_MAC_SLICE] != mac[::-1]:
             return False
     return True
+
+
+def is_x55aa_frame(payload: bytes, address: str | None = None) -> bool:
+    """Return True if ``payload`` has the 0x55aa advertisement shape.
+
+    When ``address`` is a real MAC, the forward-order echo at bytes 4-10
+    must match it.
+    """
+    return _is_x55aa_advertisement(payload, address)
 
 
 def is_aabb_frame(payload: bytes, address: str | None = None) -> bool:
@@ -142,6 +162,11 @@ def detect_protocol(
         payload = manufacturer_data.get(company)
         if payload is not None and is_aabb_frame(payload, address):
             return ScaleProtocol.AABB
+
+    for company in X55AA_COMPANY_IDS:
+        payload = manufacturer_data.get(company)
+        if payload is not None and is_x55aa_frame(payload, address):
+            return ScaleProtocol.X55AA
 
     qn_code = None
     payload = manufacturer_data.get(QN_MANUFACTURER_ID)
