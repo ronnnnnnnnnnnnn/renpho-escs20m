@@ -108,6 +108,7 @@ KNOWN_QN_SCALE_IDENTIFIERS: frozenset[int] = frozenset(
         0x099B,  # "QN-Scale", FF:04:00 OUI
         0x09E9,  # "QN-Scale", FF:03:00 OUI
         0x0216,  # "QN-Scale", D8:0B:CB OUI
+        0x0C77,  # "Renpho-Scale", FF:05:00 OUI (R-MSB01)
     }
 )
 
@@ -122,12 +123,39 @@ FALLBACK_MATCHERS: list[tuple[ScaleProtocol, str]] = [
     (ScaleProtocol.QN, "QN-Scale*"),
     (ScaleProtocol.QN, "FF:03:00:*"),
     (ScaleProtocol.QN, "FF:04:00:*"),
-    # Renpho R-MSB01 (FCC 2A26P-RMSB01 / originally 2ANDX-CS20W). Already
-    # covered by the "Renpho-Scale*" name match above on the one confirmed
-    # unit, but a name-independent address match is cheap insurance against
-    # a firmware variant that doesn't advertise that name.
     (ScaleProtocol.QN, "FF:05:00:*"),
 ]
+
+
+# Models that scramble the two resistance fields on the wire, so the values
+# in their frames are not ohms. The library withholds them rather than
+# reporting a number it knows to be wrong; see qn/scale.py.
+#
+# Identified by address prefix rather than by model identifier, because the
+# identifier travels in the scan response — an active-scan-only field that
+# passive scanners (e.g. a Home Assistant Bluetooth proxy in its default
+# mode) never relay. The identifier is still honoured when it is available.
+_OBFUSCATED_RESISTANCE_IDENTIFIERS: frozenset[int] = frozenset(
+    {
+        0x0C77,  # R-MSB01
+    }
+)
+_OBFUSCATED_RESISTANCE_ADDRESSES: tuple[str, ...] = ("FF:05:00:*",)
+
+
+def has_obfuscated_resistance(
+    address: str | None, model_code: int | None = None
+) -> bool:
+    """Return True if this device's resistance fields are not raw ohms."""
+    if model_code is not None and model_code in _OBFUSCATED_RESISTANCE_IDENTIFIERS:
+        return True
+    if not address:
+        return False
+    lowered = address.lower()
+    return any(
+        fnmatch.fnmatch(lowered, pattern.lower())
+        for pattern in _OBFUSCATED_RESISTANCE_ADDRESSES
+    )
 
 
 def detect_protocol(

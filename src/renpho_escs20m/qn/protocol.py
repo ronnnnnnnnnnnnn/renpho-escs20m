@@ -23,16 +23,13 @@ _EPOCH_OFFSET = 946656000  # scale's epoch: 2000-01-01 00:00:00 UTC
 _OP_MEASUREMENT = 0x10
 _OP_UNIT_REQUEST = 0x12
 _OP_MEAS_INIT_REQUEST = 0x14
-# Observed on a Renpho R-MSB01 (FCC ID 2A26P-RMSB01, originally granted as
-# 2ANDX-CS20W — a later hardware revision of the same CS20 platform as
-# ES-CS20M), streamed alongside every 0x10 extended-measurement frame during
-# the same settling/stable loop. Not decoded — R-MSB01 shows more on-device
-# metrics (7) than ES-CS20M's single extra body_fat field, so these two
-# frames likely carry the rest (muscle/water/bone/visceral/BMI), split out
-# rather than packed into 0x10. Recognized in qn/scale.py so they're logged
-# distinctly instead of falling into the generic "unrecognized payload"
-# bucket. See https://github.com/ronnnnnnnnnnnnn/renpho-escs20m/issues for
-# the raw hex if a future capture needs revisiting this.
+# Sent by metrics-capable models (e.g. the Renpho R-MSB01) right after each
+# final 0x10 measurement, carrying the body-composition panel the scale
+# computes on-device: 0x15 has BMI, body water, muscle mass, visceral fat,
+# body age, BMR and protein; 0x16 has bone, lean body mass, subcutaneous
+# fat, skeletal muscle, body score and body shape. Recognized here so they
+# are logged distinctly rather than falling into the generic "unrecognized
+# payload" bucket; surfacing their values is not implemented yet.
 _OP_EXTENDED_METRICS_1 = 0x15
 _OP_EXTENDED_METRICS_2 = 0x16
 _OP_PRE_MEASUREMENT = 0x21
@@ -42,6 +39,8 @@ _OP_PROFILE_ACK = 0xA1
 # Frame length (byte 1) — selects the flavor on the measurement and
 # pre-measurement frames.
 _LEN_EXTENDED_MEASUREMENT = 0x0E  # 14-byte frame, body fat on-device
+# Same layout plus one unknown trailing byte before the checksum (R-MSB01).
+_LEN_EXTENDED_MEASUREMENT_LONG = 0x0F
 _LEN_BASIC_MEASUREMENT = 0x0B  # 11-byte frame, weight + impedance
 _LEN_EXTENDED_PRE_MEASUREMENT = 0x05  # scale wants a user-profile reply
 _LEN_BASIC_PRE_MEASUREMENT = 0x04  # no reply needed; scale streams on its own
@@ -321,20 +320,15 @@ def parse_extended_measurement(payload: bytearray) -> _ExtendedFrame:
     body fat retroactively when the user identity is known later than
     the measurement (e.g. after a slow user-detection lookup).
 
-    The resistance/body-fat block is read at a fixed offset from the
-    *front* of the frame. This is deliberate, not an oversight: a Renpho
-    R-MSB01 sends a 15-byte extended frame (one byte longer than the
-    confirmed 14-byte ES-CS20M frame this was originally derived from,
-    dispatched via ``length >= _LEN_EXTENDED_MEASUREMENT`` in
-    ``qn/scale.py``), and two independent real R-MSB01 captures at
-    status=STABLE_WITH_METRICS confirmed the extra byte is a trailing pad
-    between ``body_fat`` and the checksum — invisible to front-anchored
-    offsets. (An end-anchored read was tried first and produced a
-    nonsensical `body_fat=1843.2%`; reverted once real captures showed
-    the front-anchored offsets were correct for both frame lengths all
-    along.) Do not change these offsets to be relative to the end of the
-    frame without a similarly-validated real capture — see
-    https://github.com/ronnnnnnnnnnnnn/renpho-escs20m/issues for context.
+    Every field is read at a fixed offset from the *front* of the frame,
+    which is what lets one parser serve both the 14-byte ES-CS20M frame
+    and the 15-byte R-MSB01 one: the extra byte sits after ``body_fat``,
+    ahead of the checksum.
+
+    Resistance is returned exactly as it appears on the wire. Some models
+    obfuscate it (see :func:`renpho_escs20m.detection.has_obfuscated_resistance`);
+    for those the value is not ohms and the caller-facing keys are dropped
+    upstream in ``qn/scale.py``.
     """
     status = payload[4]
     weight = int.from_bytes(payload[5:7], "big")

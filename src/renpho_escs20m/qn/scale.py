@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Callable
+from typing import Any
 
 from bleak.backends.characteristic import BleakGATTCharacteristic
 from bleak.backends.device import BLEDevice
@@ -23,6 +24,7 @@ from ..const import (
     WEIGHT_KEY,
 )
 from ..data import BluetoothScanningMode, ScaleData, WeightUnit
+from ..detection import has_obfuscated_resistance
 from ..scale import GattScale
 from .protocol import (
     Profile,
@@ -35,6 +37,7 @@ from .protocol import (
     _GUEST_USER_ID,
     _LEN_BASIC_MEASUREMENT,
     _LEN_EXTENDED_MEASUREMENT,
+    _LEN_EXTENDED_MEASUREMENT_LONG,
     _LEN_EXTENDED_PRE_MEASUREMENT,
     _LEN_STORED_MEASUREMENT,
     _MEASUREMENT_STATUS_STABLE,
@@ -300,13 +303,14 @@ class RenphoQNScale(GattScale):
                 self._handle_extended_pre_measurement(address)
             else:
                 self._handle_basic_pre_measurement(address)
-        elif opcode == _OP_MEASUREMENT and length >= _LEN_EXTENDED_MEASUREMENT:
-            # >= rather than == : a Renpho R-MSB01 (FCC 2A26P-RMSB01, a later
-            # hardware revision of the same CS20 platform as ES-CS20M) sends
-            # a confirmed 15-byte extended frame instead of 14. Front fields
-            # (guest_id@3, status@4, weight@5:7) are identical; see
-            # parse_extended_measurement's docstring for what this does and
-            # doesn't validate about the trailing metrics fields.
+        elif opcode == _OP_MEASUREMENT and length in (
+            _LEN_EXTENDED_MEASUREMENT,
+            _LEN_EXTENDED_MEASUREMENT_LONG,
+        ):
+            # Two lengths, one layout: the R-MSB01 has one extra unknown byte.
+            # Both are matched exactly rather than with >=, so that a longer
+            # frame from some future variant surfaces in the log below instead
+            # of being parsed on an assumption.
             self._handle_extended_measurement(payload, name, address)
         elif opcode == _OP_MEASUREMENT and length == _LEN_BASIC_MEASUREMENT:
             self._handle_basic_measurement(payload, name, address)
@@ -505,11 +509,36 @@ class RenphoQNScale(GattScale):
             build_stored_measurement_query(self._vendor_byte), address
         )
 
+    def _add_resistance(
+        self,
+        measurements: dict[str, Any],
+        resistance_1: int | None,
+        resistance_2: int | None,
+        address: str,
+    ) -> None:
+        """Publish the resistance pair unless this model obfuscates it.
+
+        Models that scramble these fields would otherwise report a number
+        that is not ohms; withholding keeps callers (and any long-term
+        statistics they keep) free of values that would have to change
+        meaning later. The raw pair is logged for future analysis.
+        """
+        if has_obfuscated_resistance(address):
+            self._logger.debug(
+                "ES-CS20M %s obfuscates resistance; withholding raw r1=%s r2=%s",
+                address,
+                resistance_1,
+                resistance_2,
+            )
+            return
+        measurements[RESISTANCE_1_KEY] = resistance_1
+        measurements[RESISTANCE_2_KEY] = resistance_2
+
     def _handle_extended_measurement(
         self, payload: bytearray, name: str, address: str
     ) -> None:
-        """Handle an extended-flavor measurement broadcast (``10 0e``, 14 bytes
-        on ES-CS20M; a Renpho R-MSB01 sends 15 — see parse_extended_measurement)."""
+        """Handle an extended-flavor measurement broadcast (``10 0e``, 14 bytes;
+        the 15-byte ``10 0f`` variant carries one extra unread byte)."""
         if len(payload) < _LEN_EXTENDED_MEASUREMENT:
             self._logger.debug(
                 "ES-CS20M measurement frame from %s too short (%d bytes): %s",
@@ -568,8 +597,9 @@ class RenphoQNScale(GattScale):
             if frame.body_fat is not None:
                 metrics[BODY_FAT_KEY] = frame.body_fat
             if frame.resistance_1 is not None:
-                metrics[RESISTANCE_1_KEY] = frame.resistance_1
-                metrics[RESISTANCE_2_KEY] = frame.resistance_2
+                self._add_resistance(
+                    metrics, frame.resistance_1, frame.resistance_2, address
+                )
 
             self._notification_callback(
                 ScaleData(
@@ -659,8 +689,7 @@ class RenphoQNScale(GattScale):
 
         data: dict[str, str | float | None] = {WEIGHT_KEY: frame.weight_kg}
         if frame.resistance_1 or frame.resistance_2:
-            data[RESISTANCE_1_KEY] = frame.resistance_1
-            data[RESISTANCE_2_KEY] = frame.resistance_2
+            self._add_resistance(data, frame.resistance_1, frame.resistance_2, address)
         self._notification_callback(
             ScaleData(
                 name=name,

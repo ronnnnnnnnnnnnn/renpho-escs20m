@@ -80,18 +80,17 @@ Confirmed-working (QN-series):
 | ES-32MD        | `ESCS20MA2` | `2A26P-ESCS20MA2` |
 | R-MSB01        | —           | `2A26P-RMSB01`    |
 
-- **R-MSB01** — a later hardware revision of the same CS20 platform (its FCC
-  filing was originally granted as `2ANDX-CS20W`, same "Smart Body Fat
-  Scale" equipment class, same grantee — Shenzhen Yolanda Technology).
+- **R-MSB01** — a later hardware revision of the same CS20 platform.
   Extended-flavor (on-device body fat via a BLE-pushed profile), FFF0 GATT
   layout, identical handshake and field offsets to ES-CS20M — the one
-  difference is its extended measurement frame is 15 bytes, not 14 (a
-  trailing pad byte before the checksum; see `parse_extended_measurement`'s
-  docstring). Also sends two undocumented opcodes (`0x15`/`0x16`) alongside
-  every measurement, not yet decoded — likely the rest of the 7 metrics it
-  shows on its own display, beyond the single `body_fat` field ES-CS20M's
-  frame carries. HVIN not yet confirmed (not readable over BLE; nobody's
-  reported the sticker value yet).
+  difference is its extended measurement frame is 15 bytes, not 14, with
+  one extra byte before the checksum that the parser does not read. Also
+  sends two further frames (`0x15`/`0x16`) alongside every measurement,
+  carrying the rest of the body-composition metrics it shows on its own
+  display; these are logged but not yet surfaced. Its resistance fields
+  are obfuscated on the wire, so they are omitted from the measurement
+  callback rather than reported as ohms. This model's label carries no
+  HVIN, so that column stays blank.
 
 Experimental:
 

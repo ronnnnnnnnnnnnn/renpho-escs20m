@@ -16,6 +16,7 @@ import pytest
 
 from renpho_escs20m import RenphoESCS20MScale
 from renpho_escs20m.const import (
+    BODY_FAT_KEY,
     RESISTANCE_1_KEY,
     RESISTANCE_2_KEY,
     WEIGHT_KEY,
@@ -289,18 +290,19 @@ def test_parse_extended_measurement_status_2_with_zero_bf_skips_body_fat():
 
 
 # --- R-MSB01 variant --------------------------------------------------------
-# Renpho R-MSB01 (FCC 2A26P-RMSB01, originally granted as 2ANDX-CS20W — a
-# later hardware revision of the same CS20 platform). Sends a 15-byte
-# extended frame instead of 14: front fields (guest_id@3, status@4,
-# weight@5:7) and the resistance/body-fat block (payload[7:9]/[9:11]/[11:13])
-# are identical to ES-CS20M; the extra byte is a trailing pad between
-# body_fat and the checksum. Frames below are real, captured from hardware.
-# Both independently decode to the same body_fat (32.8%), from two separate
-# weigh-ins in the same session.
+# The R-MSB01 sends a 15-byte extended frame instead of 14. Every field the
+# parser reads is at the same front-anchored offset as on the ES-CS20M
+# (guest_id@3, status@4, weight@5:7, resistance@7:11, body_fat@11:13); the
+# extra byte sits after body_fat, ahead of the checksum, and is never read.
+#
+# This model obfuscates its resistance fields, so the numbers below are raw
+# wire values rather than ohms. parse_extended_measurement reports them
+# verbatim; the caller-facing keys are dropped in _notification_handler
+# (see test_rmsb01_resistance_withheld_from_callback).
 
 
 def test_parse_extended_measurement_rmsb01_15_byte_frame_first_capture():
-    """Real R-MSB01 status=2 frame: weight 106.50 kg, r1=4335, r2=4333, bf 32.8%."""
+    """Real R-MSB01 status=2 frame: weight 106.50 kg, bf 32.8%, raw r 4335/4333."""
     payload = bytearray.fromhex("100ffffe02299a10ef10ed01480026")
     out = parse_extended_measurement(payload)
     assert out.weight_kg == 106.50
@@ -312,7 +314,7 @@ def test_parse_extended_measurement_rmsb01_15_byte_frame_first_capture():
 
 def test_parse_extended_measurement_rmsb01_15_byte_frame_second_capture():
     """Second real R-MSB01 status=2 frame, same session: same weight and
-    body_fat as the first capture, resistance varies slightly between
+    body_fat as the first capture, raw resistance varies slightly between
     the two independent BIA passes — as expected for repeat measurements."""
     payload = bytearray.fromhex("100ffffe02299a10fe10fc01480044")
     out = parse_extended_measurement(payload)
@@ -324,15 +326,16 @@ def test_parse_extended_measurement_rmsb01_15_byte_frame_second_capture():
 
 
 @pytest.mark.asyncio
-async def test_handle_extended_measurement_accepts_15_byte_rmsb01_frame():
-    """The dispatch-level length check (`>=` not `==`) must not drop a
-    15-byte frame — this is the actual bug fixed: R-MSB01 frames were
-    previously logged as 'ignoring unrecognized payload' and silently
-    discarded."""
+async def test_notification_handler_accepts_15_byte_rmsb01_frame():
+    """The 15-byte frame must survive dispatch: before the length check
+    accepted it, R-MSB01 measurements were logged as 'unrecognized payload'
+    and silently discarded. Driven through _notification_handler so the
+    dispatch length check itself is what is under test."""
     scale, callback = _make_scale()
     scale._safe_write = AsyncMock()
 
-    scale._handle_extended_measurement(
+    scale._notification_handler(
+        MagicMock(),
         bytearray.fromhex("100ffffe02299a10ef10ed01480026"),
         "Renpho-Scale",
         "FF:05:00:0A:FB:27",
@@ -341,8 +344,65 @@ async def test_handle_extended_measurement_accepts_15_byte_rmsb01_frame():
     assert callback.call_count == 1
     data = callback.call_args[0][0]
     assert data.measurements[WEIGHT_KEY] == 106.50
-    assert data.measurements[RESISTANCE_1_KEY] == 4335
-    assert data.measurements[RESISTANCE_2_KEY] == 4333
+    assert data.measurements[BODY_FAT_KEY] == 32.8
+
+
+@pytest.mark.asyncio
+async def test_rmsb01_resistance_withheld_from_callback():
+    """This model's resistance fields are obfuscated, so the wire values are
+    not ohms. They must not reach the callback under keys that claim they
+    are — a consumer storing them would have to reinterpret its history once
+    the transform is implemented."""
+    scale, callback = _make_scale()
+    scale._safe_write = AsyncMock()
+
+    scale._notification_handler(
+        MagicMock(),
+        bytearray.fromhex("100ffffe02299a10ef10ed01480026"),
+        "Renpho-Scale",
+        "FF:05:00:0A:FB:27",
+    )
+    await asyncio.sleep(0)
+    measurements = callback.call_args[0][0].measurements
+    assert RESISTANCE_1_KEY not in measurements
+    assert RESISTANCE_2_KEY not in measurements
+
+
+@pytest.mark.asyncio
+async def test_non_obfuscated_model_still_reports_resistance():
+    """The withholding is model-scoped: an ES-CS20M at a different address
+    keeps reporting resistance normally."""
+    scale, callback = _make_scale()
+    scale._safe_write = AsyncMock()
+
+    scale._notification_handler(
+        MagicMock(),
+        bytearray.fromhex("100efffe021e2301f501f3000048"),
+        "Renpho-Scale",
+        "FF:04:00:0A:FB:27",
+    )
+    await asyncio.sleep(0)
+    measurements = callback.call_args[0][0].measurements
+    assert measurements[RESISTANCE_1_KEY] == 501
+    assert measurements[RESISTANCE_2_KEY] == 499
+
+
+@pytest.mark.asyncio
+async def test_notification_handler_ignores_overlong_measurement_frame():
+    """Only the two known extended lengths are parsed. A longer frame from
+    some future variant may not share this layout, so it is logged rather
+    than parsed on an assumption."""
+    scale, callback = _make_scale()
+    scale._safe_write = AsyncMock()
+
+    scale._notification_handler(
+        MagicMock(),
+        bytearray.fromhex("1010fffe02299a10ef10ed0148000026"),
+        "Renpho-Scale",
+        "FF:05:00:0A:FB:27",
+    )
+    await asyncio.sleep(0)
+    assert callback.call_count == 0
 
 
 # --- ESCS20MN variant -----------------------------------------------------
