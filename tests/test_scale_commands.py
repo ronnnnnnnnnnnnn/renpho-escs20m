@@ -801,6 +801,29 @@ def test_parse_extended_stored_measurement_zero_body_fat_is_none():
 
 
 @pytest.mark.asyncio
+async def test_stored_metrics_frames_are_discarded_not_unrecognized(caplog):
+    """Real 0x24/0x25 companions from a drained record's triple. They share
+    the fate of the 0x23 they belong to — discarded, no callback — but must
+    be recognized, so they stay out of the unrecognized-payload bucket."""
+    caplog.set_level(logging.DEBUG, logger="renpho_escs20m.scale")
+    scale, callback = _make_scale(clear_stored_measurements=True)
+    scale._safe_write = AsyncMock()
+
+    for hx in (
+        "2414ff014a01e4027d0f3e077e00990037070897",
+        "2511ff000022029f011d01b10253060427",
+    ):
+        scale._notification_handler(MagicMock(), bytearray.fromhex(hx), "QN", "addr")
+    await asyncio.sleep(0)
+
+    callback.assert_not_called()
+    scale._safe_write.assert_not_awaited()
+    messages = [r.getMessage() for r in caplog.records]
+    assert sum("discarding stored metrics frame" in m for m in messages) == 2
+    assert not any("unrecognized payload" in m for m in messages)
+
+
+@pytest.mark.asyncio
 async def test_failed_profile_ack_sends_no_stored_query():
     """The extended query follows only a *successful* (status 0x01) ack."""
     scale, _ = _make_scale(clear_stored_measurements=True)

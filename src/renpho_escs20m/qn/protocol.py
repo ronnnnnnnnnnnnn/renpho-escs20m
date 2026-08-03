@@ -34,6 +34,8 @@ _OP_EXTENDED_METRICS_1 = 0x15
 _OP_EXTENDED_METRICS_2 = 0x16
 _OP_PRE_MEASUREMENT = 0x21
 _OP_STORED_MEASUREMENT = 0x23
+_OP_STORED_METRICS_1 = 0x24
+_OP_STORED_METRICS_2 = 0x25
 _OP_PROFILE_ACK = 0xA1
 
 # Frame length (byte 1) — selects the flavor on the measurement and

@@ -50,6 +50,8 @@ from .protocol import (
     _OP_PRE_MEASUREMENT,
     _OP_PROFILE_ACK,
     _OP_STORED_MEASUREMENT,
+    _OP_STORED_METRICS_1,
+    _OP_STORED_METRICS_2,
     _OP_UNIT_REQUEST,
     _build_command_for_profile,
     build_end_measurement_command,
@@ -316,6 +318,16 @@ class RenphoQNScale(GattScale):
             self._handle_basic_measurement(payload, name, address)
         elif opcode == _OP_STORED_MEASUREMENT:
             self._handle_stored_measurement(payload, address)
+        elif opcode in (_OP_STORED_METRICS_1, _OP_STORED_METRICS_2):
+            # The other two frames of a drained record's 0x23/0x24/0x25
+            # triple. The record itself is discarded, so these are too.
+            self._logger.debug(
+                "ES-CS20M discarding stored metrics frame (opcode 0x%02x) "
+                "from %s: %s",
+                opcode,
+                address,
+                payload.hex(),
+            )
         elif opcode in (_OP_EXTENDED_METRICS_1, _OP_EXTENDED_METRICS_2):
             # Not decoded — see the constant definitions in protocol.py.
             # Logged distinctly so a future capture is easy to find.
