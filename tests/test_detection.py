@@ -87,6 +87,14 @@ def test_name_fallback_classifies_qn():
     assert detect_protocol(None, {}, address="FF:04:00:12:34:56") == ScaleProtocol.QN
 
 
+def test_rmsb01_oui_fallback_classifies_qn():
+    # Renpho R-MSB01's confirmed OUI (FCC 2A26P-RMSB01). Address-only match,
+    # no name and no recognized identifier — mirrors the real device, which
+    # was classified via the "Renpho-Scale*" name match on the one unit
+    # captured so far; this covers the case where that name isn't present.
+    assert detect_protocol(None, {}, address="FF:05:00:0A:FB:27") == ScaleProtocol.QN
+
+
 def test_unrecognized_identifier_logged_once(caplog):
     detection_module._reported_identifiers.clear()
     with caplog.at_level(logging.INFO, logger="renpho_escs20m.detection"):
