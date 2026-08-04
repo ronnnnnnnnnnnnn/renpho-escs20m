@@ -27,9 +27,10 @@ _OP_MEAS_INIT_REQUEST = 0x14
 # final 0x10 measurement, carrying the body-composition panel the scale
 # computes on-device: 0x15 has BMI, body water, muscle mass, visceral fat,
 # body age, BMR and protein; 0x16 has bone, lean body mass, subcutaneous
-# fat, skeletal muscle, body score and body shape. Recognized here so they
-# are logged distinctly rather than falling into the generic "unrecognized
-# payload" bucket; surfacing their values is not implemented yet.
+# fat, skeletal muscle, body score and body shape. Decoded by
+# parse_metrics_panel_a/_b below; delivery is gated on the per-model
+# panel-sender registry (detection.sends_metrics_panel) — see
+# _handle_extended_metrics in qn/scale.py.
 _OP_EXTENDED_METRICS_1 = 0x15
 _OP_EXTENDED_METRICS_2 = 0x16
 _OP_PRE_MEASUREMENT = 0x21
@@ -480,4 +481,103 @@ def parse_basic_measurement(payload: bytearray) -> _BasicFrame:
         status=payload[5],
         resistance_1=int.from_bytes(payload[6:8], "big"),
         resistance_2=int.from_bytes(payload[8:10], "big"),
+    )
+
+
+# --- Extended body-metrics frames ------------------------------------------
+#
+# Metrics-capable models stream the body-composition panel they compute
+# on-device in two extra frames after each final measurement (0x15/0x16),
+# and in the same layout as the companions of a drained stored record
+# (0x24/0x25). One pair of parsers therefore serves both — capture-verified
+# on both forms.
+#
+# Mass fields (muscle mass, bone mass, fat-free mass) are
+# 0.1-percent-of-body-weight values (mass = pct/100 x weight).
+
+_LEN_METRICS_PANEL = 15  # both panels are read up to offset 14
+
+
+class _MetricsPanelA(NamedTuple):
+    """Fields of the first metrics frame (``0x15`` live, ``0x24`` stored)."""
+
+    bmi: float
+    body_water: float
+    muscle_mass: float
+    visceral_fat: int
+    body_age: int
+    bmr: int
+    protein: float
+
+
+class _MetricsPanelB(NamedTuple):
+    """Fields of the second metrics frame (``0x16`` live, ``0x25`` stored)."""
+
+    bone_mass: float
+    fat_free_mass: float
+    subcutaneous_fat: float
+    skeletal_muscle: float
+    body_score: float
+    body_shape: int
+
+
+def _metric_mass(raw: int, weight_kg: float) -> float:
+    """Decode a mass field (raw 0.1 % of body weight) to kg."""
+    return round(raw / 1000 * weight_kg, 2)
+
+
+def parse_metrics_panel_a(payload: bytearray, weight_kg: float) -> _MetricsPanelA:
+    """Decode the first metrics frame.
+
+    Layout (identical for the live ``0x15`` and stored ``0x24`` forms;
+    the stored frame carries extra trailing bytes that are not read
+    here)::
+
+        0..2    prefix 15/24 <length> <vendor>
+        3..4    BMI, 0.1
+        5..6    body water, 0.1 %
+        7..8    muscle mass, 0.1 % of body weight (see _metric_mass)
+        9       visceral fat rating
+        10      body age, years
+        11..12  basal metabolic rate, kcal/day
+        13..14  protein, 0.1 %
+
+    The caller validates length (>= 15 bytes).
+    """
+    return _MetricsPanelA(
+        bmi=round(int.from_bytes(payload[3:5], "big") / 10, 1),
+        body_water=round(int.from_bytes(payload[5:7], "big") / 10, 1),
+        muscle_mass=_metric_mass(int.from_bytes(payload[7:9], "big"), weight_kg),
+        visceral_fat=payload[9],
+        body_age=payload[10],
+        bmr=int.from_bytes(payload[11:13], "big"),
+        protein=round(int.from_bytes(payload[13:15], "big") / 10, 1),
+    )
+
+
+def parse_metrics_panel_b(payload: bytearray, weight_kg: float) -> _MetricsPanelB:
+    """Decode the second metrics frame.
+
+    Layout (identical for the live ``0x16`` and stored ``0x25`` forms;
+    the stored frame carries an extra trailing byte that is not read
+    here)::
+
+        0..2    prefix 16/25 <length> <vendor>
+        3       not decoded (0 in every capture)
+        4..5    bone mass, 0.1 % of body weight (see _metric_mass)
+        6..7    fat-free mass, 0.1 % of body weight (see _metric_mass)
+        8..9    subcutaneous fat, 0.1 %
+        10..11  skeletal muscle, 0.1 %
+        12..13  body score, 0.1
+        14      body shape rating
+
+    The caller validates length (>= 15 bytes).
+    """
+    return _MetricsPanelB(
+        bone_mass=_metric_mass(int.from_bytes(payload[4:6], "big"), weight_kg),
+        fat_free_mass=_metric_mass(int.from_bytes(payload[6:8], "big"), weight_kg),
+        subcutaneous_fat=round(int.from_bytes(payload[8:10], "big") / 10, 1),
+        skeletal_muscle=round(int.from_bytes(payload[10:12], "big") / 10, 1),
+        body_score=round(int.from_bytes(payload[12:14], "big") / 10, 1),
+        body_shape=payload[14],
     )

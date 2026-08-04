@@ -16,9 +16,22 @@ import pytest
 
 from renpho_escs20m import RenphoESCS20MScale
 from renpho_escs20m.const import (
+    BMI_KEY,
+    BMR_KEY,
+    BODY_AGE_KEY,
     BODY_FAT_KEY,
+    BODY_SCORE_KEY,
+    BODY_SHAPE_KEY,
+    BODY_WATER_KEY,
+    BONE_MASS_KEY,
+    FAT_FREE_MASS_KEY,
+    MUSCLE_MASS_KEY,
+    PROTEIN_KEY,
     RESISTANCE_1_KEY,
     RESISTANCE_2_KEY,
+    SKELETAL_MUSCLE_KEY,
+    SUBCUTANEOUS_FAT_KEY,
+    VISCERAL_FAT_KEY,
     WEIGHT_KEY,
 )
 from renpho_escs20m.data import WeightUnit
@@ -35,6 +48,7 @@ from renpho_escs20m.qn.protocol import (
     parse_basic_measurement,
     parse_extended_measurement,
     parse_extended_stored_measurement,
+    parse_metrics_panel_a,
     parse_stored_measurement,
 )
 
@@ -330,7 +344,9 @@ async def test_notification_handler_accepts_15_byte_rmsb01_frame():
     """The 15-byte frame must survive dispatch: before the length check
     accepted it, R-MSB01 measurements were logged as 'unrecognized payload'
     and silently discarded. Driven through _notification_handler so the
-    dispatch length check itself is what is under test."""
+    dispatch length check itself is what is under test. (Sent from an
+    address outside the panel-sender registry so the reading is delivered
+    immediately rather than held for its metrics panel.)"""
     scale, callback = _make_scale()
     scale._safe_write = AsyncMock()
 
@@ -338,7 +354,7 @@ async def test_notification_handler_accepts_15_byte_rmsb01_frame():
         MagicMock(),
         bytearray.fromhex("100ffffe02299a10ef10ed01480026"),
         "Renpho-Scale",
-        "FF:05:00:0A:FB:27",
+        "00:11:22:33:44:55",
     )
     await asyncio.sleep(0)
     assert callback.call_count == 1
@@ -356,13 +372,16 @@ async def test_rmsb01_resistance_withheld_from_callback():
     scale, callback = _make_scale()
     scale._safe_write = AsyncMock()
 
-    scale._notification_handler(
-        MagicMock(),
-        bytearray.fromhex("100ffffe02299a10ef10ed01480026"),
-        "Renpho-Scale",
-        "FF:05:00:0A:FB:27",
-    )
-    await asyncio.sleep(0)
+    for hx in (
+        "100ffffe02299a10ef10ed01480026",
+        RMSB01_METRICS_A,
+        RMSB01_METRICS_B,
+    ):
+        scale._notification_handler(
+            MagicMock(), bytearray.fromhex(hx), "Renpho-Scale", "FF:05:00:0A:FB:27"
+        )
+        await asyncio.sleep(0)
+    assert callback.call_count == 1
     measurements = callback.call_args[0][0].measurements
     assert RESISTANCE_1_KEY not in measurements
     assert RESISTANCE_2_KEY not in measurements
@@ -385,6 +404,204 @@ async def test_non_obfuscated_model_still_reports_resistance():
     measurements = callback.call_args[0][0].measurements
     assert measurements[RESISTANCE_1_KEY] == 501
     assert measurements[RESISTANCE_2_KEY] == 499
+
+
+RMSB01_FINAL = "100ffffe02295410f910df014400d8"
+RMSB01_METRICS_A = "1510ff014701e802820f3d0779009a3f"
+RMSB01_METRICS_B = "1610ff00002202a4011801b4025a061d"
+
+
+@pytest.mark.asyncio
+async def test_extended_metrics_frames_deliver_full_panel():
+    """On a registered panel-sender the final reading is held for its
+    0x15/0x16 frames and delivered exactly once, complete: one weigh-in,
+    one callback, weight and body fat plus the full panel. The
+    end-measurement command follows the same timing — sent when the
+    panel closes, not on the final frame, matching the official app's
+    captured behavior on this model."""
+    scale, callback = _make_scale()
+    scale._safe_write = AsyncMock()
+
+    scale._notification_handler(
+        MagicMock(),
+        bytearray.fromhex(RMSB01_FINAL),
+        "Renpho-Scale",
+        "FF:05:00:0A:FB:27",
+    )
+    await asyncio.sleep(0)
+    scale._safe_write.assert_not_awaited()  # confirmed only once the panel closes
+
+    for hx in (RMSB01_METRICS_A, RMSB01_METRICS_B):
+        scale._notification_handler(
+            MagicMock(), bytearray.fromhex(hx), "Renpho-Scale", "FF:05:00:0A:FB:27"
+        )
+        await asyncio.sleep(0)
+
+    scale._safe_write.assert_awaited_once_with(build_end_measurement_command())
+    assert callback.call_count == 1
+    full = callback.call_args_list[0][0][0].measurements
+    # Weight and body fat are repeated so the enriched reading stands alone.
+    assert full[WEIGHT_KEY] == 105.80
+    assert full[BODY_FAT_KEY] == 32.4
+    assert full[BMI_KEY] == 32.7
+    assert full[BODY_WATER_KEY] == 48.8
+    assert full[MUSCLE_MASS_KEY] == 67.92
+    assert full[VISCERAL_FAT_KEY] == 15
+    assert full[BODY_AGE_KEY] == 61
+    assert full[BMR_KEY] == 1913
+    assert full[PROTEIN_KEY] == 15.4
+    assert full[BONE_MASS_KEY] == 3.6
+    assert full[FAT_FREE_MASS_KEY] == 71.52
+    assert full[SUBCUTANEOUS_FAT_KEY] == 28.0
+    assert full[SKELETAL_MUSCLE_KEY] == 43.6
+    assert full[BODY_SCORE_KEY] == 60.2
+    assert full[BODY_SHAPE_KEY] == 6
+
+
+@pytest.mark.asyncio
+async def test_metrics_frames_without_measurement_are_ignored():
+    """A panel frame with nothing to attach to must not fabricate a reading."""
+    scale, callback = _make_scale()
+    scale._safe_write = AsyncMock()
+
+    for hx in (RMSB01_METRICS_A, RMSB01_METRICS_B):
+        scale._notification_handler(
+            MagicMock(), bytearray.fromhex(hx), "Renpho-Scale", "FF:05:00:0A:FB:27"
+        )
+    await asyncio.sleep(0)
+    callback.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_metrics_panel_delivered_once_per_measurement():
+    """A repeated 0x16 must not re-deliver the reading or re-send the
+    end-measurement command: the pending copy is consumed when the panel
+    closes."""
+    scale, callback = _make_scale()
+    scale._safe_write = AsyncMock()
+
+    for hx in (RMSB01_FINAL, RMSB01_METRICS_A, RMSB01_METRICS_B, RMSB01_METRICS_B):
+        scale._notification_handler(
+            MagicMock(), bytearray.fromhex(hx), "Renpho-Scale", "FF:05:00:0A:FB:27"
+        )
+        await asyncio.sleep(0)
+
+    assert callback.call_count == 1
+    scale._safe_write.assert_awaited_once_with(build_end_measurement_command())
+
+
+@pytest.mark.asyncio
+async def test_held_reading_flushed_when_panel_never_arrives():
+    """The hold must never lose a reading: if the panel frames don't come,
+    the flush deadline delivers the bare reading."""
+    scale, callback = _make_scale()
+    scale._safe_write = AsyncMock()
+    scale._metrics_flush_seconds = 0.01
+
+    scale._notification_handler(
+        MagicMock(),
+        bytearray.fromhex(RMSB01_FINAL),
+        "Renpho-Scale",
+        "FF:05:00:0A:FB:27",
+    )
+    await asyncio.sleep(0)
+    callback.assert_not_called()  # held, not lost
+
+    await asyncio.sleep(0.05)
+    assert callback.call_count == 1
+    measurements = callback.call_args[0][0].measurements
+    assert measurements[WEIGHT_KEY] == 105.80
+    assert measurements[BODY_FAT_KEY] == 32.4
+    assert BMI_KEY not in measurements
+    # The end-measurement command rides the flush too — late, never lost.
+    scale._safe_write.assert_awaited_once_with(build_end_measurement_command())
+
+
+@pytest.mark.asyncio
+async def test_flush_delivers_partial_panel():
+    """If only 0x15 arrived before the deadline, its seven fields still
+    ride along on the flushed reading."""
+    scale, callback = _make_scale()
+    scale._safe_write = AsyncMock()
+    scale._metrics_flush_seconds = 0.01
+
+    for hx in (RMSB01_FINAL, RMSB01_METRICS_A):
+        scale._notification_handler(
+            MagicMock(), bytearray.fromhex(hx), "Renpho-Scale", "FF:05:00:0A:FB:27"
+        )
+        await asyncio.sleep(0)
+    await asyncio.sleep(0.05)
+
+    assert callback.call_count == 1
+    measurements = callback.call_args[0][0].measurements
+    assert measurements[BMI_KEY] == 32.7
+    assert BONE_MASS_KEY not in measurements
+
+
+@pytest.mark.asyncio
+async def test_flush_timer_survives_disconnect():
+    """A session ending before the panel completes must not lose the held
+    reading: the flush timer needs no connection, so it delivers after
+    the disconnect."""
+    scale, callback = _make_scale()
+    scale._safe_write = AsyncMock()
+    scale._metrics_flush_seconds = 0.01
+
+    scale._notification_handler(
+        MagicMock(),
+        bytearray.fromhex(RMSB01_FINAL),
+        "Renpho-Scale",
+        "FF:05:00:0A:FB:27",
+    )
+    await asyncio.sleep(0)
+    callback.assert_not_called()
+
+    scale._unavailable_callback(MagicMock())
+    await asyncio.sleep(0.05)
+    assert callback.call_count == 1
+    assert callback.call_args[0][0].measurements[WEIGHT_KEY] == 105.80
+
+
+@pytest.mark.asyncio
+async def test_unregistered_panel_sender_warns_and_ignores(caplog):
+    """0x15/0x16 from a model not in the panel registry are not parsed —
+    the layout is only verified per model, and delivering
+    plausible-but-unverified body composition is the silent-misparse
+    failure mode this library avoids. One warning per session asks for a
+    report instead."""
+    caplog.set_level(logging.WARNING, logger="renpho_escs20m.scale")
+    scale, callback = _make_scale()
+    scale._safe_write = AsyncMock()
+
+    for hx in (RMSB01_FINAL, RMSB01_METRICS_A, RMSB01_METRICS_B):
+        scale._notification_handler(
+            MagicMock(), bytearray.fromhex(hx), "Renpho-Scale", "00:11:22:33:44:55"
+        )
+        await asyncio.sleep(0)
+
+    # The reading was delivered immediately, once, without panel fields.
+    assert callback.call_count == 1
+    measurements = callback.call_args[0][0].measurements
+    assert measurements[WEIGHT_KEY] == 105.80
+    assert BMI_KEY not in measurements
+
+    # Two metrics frames, one warning, and it asks for a report.
+    warnings = [
+        r.getMessage()
+        for r in caplog.records
+        if "not registered as a metrics-capable model" in r.getMessage()
+    ]
+    assert len(warnings) == 1
+    assert "report" in warnings[0]
+
+
+def test_metrics_mass_fields_decoded_as_percent_of_weight():
+    """Mass fields are 0.1 % of body weight — verified against the kg
+    values the official app displays for the same weigh-in."""
+    payload = bytearray.fromhex(RMSB01_METRICS_A)
+    panel = parse_metrics_panel_a(payload, 105.80)
+    # Raw muscle field is 642: 64.2 % of 105.80 kg.
+    assert panel.muscle_mass == 67.92
 
 
 @pytest.mark.asyncio

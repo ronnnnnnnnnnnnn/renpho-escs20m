@@ -31,6 +31,7 @@ current list of confirmed-working models.
 - Guest-mode protocol — coexists safely with users registered by the official Renpho app on the same scale.
 - Three modes: fixed-user (with `Profile`), user-detection (with async resolver), and weight-only.
 - `BodyMetrics` derives 9 body-composition metrics from a stable reading: BMI, fat-free mass, body water %, skeletal muscle %, muscle mass, bone mass, protein %, BMR, and a body fat % passthrough.
+- On models that compute a full body-composition panel on-device (e.g. the R-MSB01), the scale's own metrics — BMI, body water, muscle and bone mass, visceral fat, BMR, protein and more — are delivered merged into the measurement callback.
 - **Experimental:** weight-only support for the broadcast-only ES-CS20M subvariant via `RenphoAABBScale` (no body composition — see [Device compatibility](#device-compatibility)).
 
 ## Installation
@@ -84,13 +85,14 @@ Confirmed-working (QN-series):
   Extended-flavor (on-device body fat via a BLE-pushed profile), FFF0 GATT
   layout, identical handshake and field offsets to ES-CS20M — the one
   difference is its extended measurement frame is 15 bytes, not 14, with
-  one extra byte before the checksum that the parser does not read. Also
-  sends two further frames (`0x15`/`0x16`) alongside every measurement,
-  carrying the rest of the body-composition metrics it shows on its own
-  display; these are logged but not yet surfaced. Its resistance fields
-  are obfuscated on the wire, so they are omitted from the measurement
-  callback rather than reported as ohms. This model's label carries no
-  HVIN, so that column stays blank.
+  one extra byte before the checksum that the parser does not read. It
+  also computes the full body-composition panel on-device and sends it
+  in two further frames after each measurement, which the library
+  reports via the on-device metrics keys described under
+  [Measurements](#measurements). Its resistance fields seem to be obfuscated on
+  the wire, so they are omitted from the measurement callback rather
+  than reported as ohms — body composition comes from the scale itself
+  here, so nothing is lost.
 
 Experimental:
 
@@ -117,6 +119,7 @@ Known-incompatible — `0x55aa` (not yet supported):
 |----------------|-------------|-------------------|--------------------------------|
 | ES-CS20M       | `ESCS20MB2` | `2A26P-ESCS20MB2` | `0x55aa` (extended flavor)     |
 | ES-26BB-B      | `ES26BBB`   | ?                 | `0x55aa` (basic flavor)        |
+| R-A012         | —           | `2A26P-RA012N`    | `0x55aa` (basic flavor)        |
 
 The **Protocol** column records the first bytes of the notification frames
 each unsupported variant emits — a rough fingerprint of the (different) BLE
@@ -349,6 +352,7 @@ Known QN model identifiers, observed in real advertisement captures:
 | 0x099B | "QN-Scale", FF:04:00 OUI |
 | 0x09E9 | "QN-Scale", FF:03:00 OUI |
 | 0x0216 | "QN-Scale", D8:0B:CB OUI |
+| 0x0C77 | "Renpho-Scale", FF:05:00 OUI (R-MSB01) |
 
 Advertisements with an unrecognized QN model identifier still classify
 via a name/address fallback matcher and log a warning — reporting that
@@ -374,7 +378,9 @@ identifier registry grows.
   fat is computed off-scale via `calculate_body_fat()`. In all cases
   "weight-only mode" refers to what the scale computes and displays —
   it never restricts what the library reports: both flavors deliver
-  raw impedance in every mode, and it is passed through.
+  raw impedance in every mode, and it is passed through — except on
+  models whose resistance fields are obfuscated on the wire, where the
+  values are withheld (see [Measurements](#measurements)).
 
   `clear_stored_measurements=True` (default `False`) drains the scale's
   store of offline measurements — readings taken while nothing was
@@ -393,7 +399,10 @@ identifier registry grows.
 - `callback` (passed to `RenphoQNScale`) — invoked once per
   measurement, on the final frame the scale emits (the
   `stable-with-metrics` frame on the extended flavor; the status-`0x01`
-  final frame on the basic flavor). In user-detection mode, the earlier
+  final frame on the basic flavor). On recognized panel-sending models
+  (e.g. the R-MSB01) the invocation comes a moment later, once the
+  scale's body-composition panel has arrived and been merged in — see
+  [Measurements](#measurements). In user-detection mode, the earlier
   `stable` frame is used only to trigger the profile resolver and does
   not reach the callback. Within the frame, `ScaleData.measurements`
   always contains `WEIGHT_KEY`; `BODY_FAT_KEY` and the two
@@ -403,7 +412,8 @@ identifier registry grows.
   mode, in user-detection mode if the resolver returned `None`, and any
   time `algorithm=0x00`. Impedance is reported by both flavors in every
   mode — the impedance pass runs even under the bootstrap
-  (`algorithm=0x00`) profile. The basic flavor never produces
+  (`algorithm=0x00`) profile — but withheld on obfuscated-resistance
+  models. The basic flavor never produces
   `BODY_FAT_KEY` — compute body fat from `RESISTANCE_1_KEY` with
   `calculate_body_fat()`.
 - `scale.battery_level` — last successfully-read battery percentage
@@ -473,7 +483,30 @@ identifier registry grows.
     `"resistance_2"`) — bioelectrical impedance in ohms (present on
     final frames when non-zero; the two readings are typically within a
     couple of ohms of each other and either can be fed to
-    `calculate_body_fat()`).
+    `calculate_body_fat()`). Absent on models that obfuscate these
+    fields, where the wire values are not ohms.
+- On-device body composition, reported only by models that compute it
+  themselves (see below):
+  - `BMI_KEY`, `BODY_SCORE_KEY` (`"bmi"`, `"body_score"`) — ratings
+  - `BODY_WATER_KEY`, `PROTEIN_KEY`, `SUBCUTANEOUS_FAT_KEY`,
+    `SKELETAL_MUSCLE_KEY` — %
+  - `MUSCLE_MASS_KEY`, `BONE_MASS_KEY`, `FAT_FREE_MASS_KEY` — kg
+  - `BMR_KEY` — kcal/day
+  - `VISCERAL_FAT_KEY`, `BODY_AGE_KEY`, `BODY_SHAPE_KEY` — the scale's
+    own unitless ratings. `BODY_AGE_KEY` is the scale's value; the
+    Renpho app displays a metabolic age it derives separately, so the
+    two differ slightly.
+
+  The scale sends its body-composition panel a moment after the final
+  measurement frame. On recognized panel-sending models the library
+  holds the reading briefly and delivers it **once, complete** — one
+  weigh-in, one callback, panel included. If the panel never finishes
+  (lost frames, early disconnect), the reading is still delivered
+  within about a second, just without the missing fields — it is never
+  lost. A model that sends these frames without being recognized gets
+  its reading immediately as usual, minus the panel: the frame layout
+  is only trusted on verified models, so the library logs a warning
+  asking for the model to be reported rather than guessing.
 
 ### Body composition
 
@@ -578,6 +611,10 @@ scan on
 ```
 
 (See [home-assistant/core#76186 (comment)](https://github.com/home-assistant/core/issues/76186#issuecomment-1204954485) for context.)
+
+## Acknowledgments
+
+- R-MSB01 support contributed by [@Jaano](https://github.com/Jaano) — thank you!
 
 ## Support the project
 

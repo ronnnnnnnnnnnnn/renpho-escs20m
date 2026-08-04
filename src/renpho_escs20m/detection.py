@@ -158,6 +158,37 @@ def has_obfuscated_resistance(
     )
 
 
+# Models that compute the full body-composition panel on-device and stream
+# it in extra frames right after each final measurement. For these the
+# final reading is held briefly and delivered once, merged with the panel
+# (see qn/scale.py). The panel layout is only trusted per registered
+# model: frames from an unregistered sender are ignored with a report-it
+# warning rather than parsed on an assumption. Kept separate from the
+# obfuscation registry above — the two capabilities are independent even
+# though the R-MSB01 happens to have both — but identified the same way,
+# and for the same reason: the model identifier only travels in the scan
+# response, which passive scanners never relay.
+_METRICS_PANEL_IDENTIFIERS: frozenset[int] = frozenset(
+    {
+        0x0C77,  # R-MSB01
+    }
+)
+_METRICS_PANEL_ADDRESSES: tuple[str, ...] = ("FF:05:00:*",)
+
+
+def sends_metrics_panel(address: str | None, model_code: int | None = None) -> bool:
+    """Return True if this device streams an on-device body-composition panel."""
+    if model_code is not None and model_code in _METRICS_PANEL_IDENTIFIERS:
+        return True
+    if not address:
+        return False
+    lowered = address.lower()
+    return any(
+        fnmatch.fnmatch(lowered, pattern.lower())
+        for pattern in _METRICS_PANEL_ADDRESSES
+    )
+
+
 def detect_protocol(
     local_name: str | None,
     manufacturer_data: dict[int, bytes] | None,

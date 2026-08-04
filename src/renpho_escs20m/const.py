@@ -22,6 +22,26 @@ BODY_FAT_KEY = "body_fat"
 RESISTANCE_1_KEY = "resistance_1"
 RESISTANCE_2_KEY = "resistance_2"
 
+# Body-composition metrics some scales compute on-device and stream after
+# the final measurement. Only models that send the extended-metrics frames
+# report these; everywhere else the caller derives its own from body fat
+# (see :mod:`renpho_escs20m.body_metrics`). Masses are kg, percentages are
+# percent, BMR is kcal/day, and visceral fat, body age, body score and body
+# shape are the scale's own unitless ratings.
+BMI_KEY = "bmi"
+BODY_WATER_KEY = "body_water"
+MUSCLE_MASS_KEY = "muscle_mass"
+VISCERAL_FAT_KEY = "visceral_fat"
+BODY_AGE_KEY = "body_age"
+BMR_KEY = "bmr"
+PROTEIN_KEY = "protein"
+BONE_MASS_KEY = "bone_mass"
+FAT_FREE_MASS_KEY = "fat_free_mass"
+SUBCUTANEOUS_FAT_KEY = "subcutaneous_fat"
+SKELETAL_MUSCLE_KEY = "skeletal_muscle"
+BODY_SCORE_KEY = "body_score"
+BODY_SHAPE_KEY = "body_shape"
+
 __all__ = [
     "NOTIFY_CHARACTERISTIC_UUID",
     "COMMAND_CHARACTERISTIC_UUID",
@@ -35,4 +55,17 @@ __all__ = [
     "BODY_FAT_KEY",
     "RESISTANCE_1_KEY",
     "RESISTANCE_2_KEY",
+    "BMI_KEY",
+    "BODY_WATER_KEY",
+    "MUSCLE_MASS_KEY",
+    "VISCERAL_FAT_KEY",
+    "BODY_AGE_KEY",
+    "BMR_KEY",
+    "PROTEIN_KEY",
+    "BONE_MASS_KEY",
+    "FAT_FREE_MASS_KEY",
+    "SUBCUTANEOUS_FAT_KEY",
+    "SKELETAL_MUSCLE_KEY",
+    "BODY_SCORE_KEY",
+    "BODY_SHAPE_KEY",
 ]

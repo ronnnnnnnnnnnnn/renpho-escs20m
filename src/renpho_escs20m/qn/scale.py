@@ -12,19 +12,32 @@ from bleak.backends.device import BLEDevice
 from bleak.backends.scanner import BaseBleakScanner
 
 from ..const import (
+    BMI_KEY,
+    BMR_KEY,
+    BODY_AGE_KEY,
     BODY_FAT_KEY,
+    BODY_SCORE_KEY,
+    BODY_SHAPE_KEY,
+    BODY_WATER_KEY,
+    BONE_MASS_KEY,
     COMMAND_CHARACTERISTIC_UUID,
+    FAT_FREE_MASS_KEY,
     FFE0_ALT_COMMAND_CHARACTERISTIC_UUID,
     FFE0_COMMAND_CHARACTERISTIC_UUID,
     FFE0_INDICATE_CHARACTERISTIC_UUID,
     FFE0_NOTIFY_CHARACTERISTIC_UUID,
+    MUSCLE_MASS_KEY,
     NOTIFY_CHARACTERISTIC_UUID,
+    PROTEIN_KEY,
     RESISTANCE_1_KEY,
     RESISTANCE_2_KEY,
+    SKELETAL_MUSCLE_KEY,
+    SUBCUTANEOUS_FAT_KEY,
+    VISCERAL_FAT_KEY,
     WEIGHT_KEY,
 )
 from ..data import BluetoothScanningMode, ScaleData, WeightUnit
-from ..detection import has_obfuscated_resistance
+from ..detection import has_obfuscated_resistance, sends_metrics_panel
 from ..scale import GattScale
 from .protocol import (
     Profile,
@@ -39,6 +52,7 @@ from .protocol import (
     _LEN_EXTENDED_MEASUREMENT,
     _LEN_EXTENDED_MEASUREMENT_LONG,
     _LEN_EXTENDED_PRE_MEASUREMENT,
+    _LEN_METRICS_PANEL,
     _LEN_STORED_MEASUREMENT,
     _MEASUREMENT_STATUS_STABLE,
     _MEASUREMENT_STATUS_STABLE_WITH_METRICS,
@@ -61,6 +75,8 @@ from .protocol import (
     build_unit_update_command,
     parse_basic_measurement,
     parse_extended_measurement,
+    parse_metrics_panel_a,
+    parse_metrics_panel_b,
     parse_extended_stored_measurement,
     parse_stored_measurement,
 )
@@ -74,12 +90,22 @@ _STATE_PROFILE_RESOLVING = 8
 _STATE_BASIC_FINAL = 16
 # Set once the stored-measurement query has been sent this session.
 _STATE_STORED_QUERY = 32
+# Set once this session has warned about metrics frames from a model not
+# registered as a panel-sender, so the warning fires once, not per frame.
+_STATE_METRICS_WARNED = 64
 
 # On the FFE0 transport command writes are split across two characteristics
 # (capture-verified): set-time (0x20) and the stored-measurement query
 # (0x22) go to FFE4, everything else to FFE3. (The FFF0 transport has a
 # single shared command characteristic, FFF2.)
 _FFE0_ALT_COMMAND_OPCODES = frozenset({0x20, 0x22})
+
+# How long a metrics-capable scale's final reading is held for its
+# body-composition panel before being delivered without it. The panel
+# arrives 100-200 ms after the final frame on captured hardware; the margin
+# covers a slow link, and the deadline guarantees a reading is never lost
+# to missing panel frames.
+_METRICS_PANEL_FLUSH_SECONDS = 1.0
 
 
 class RenphoQNScale(GattScale):
@@ -195,6 +221,18 @@ class RenphoQNScale(GattScale):
         # byte, so the record handler must pick the matching parser.
         self._stored_records_extended = False
 
+        # The final measurement awaiting its extended-metrics frames, and
+        # the panel accumulated from them. Set only for models registered
+        # as panel-senders (detection.sends_metrics_panel): those send
+        # 0x15/0x16 shortly *after* the final measurement frame, so the
+        # reading is held and delivered once, merged with the panel, with
+        # a flush deadline so it is never lost (see
+        # _handle_extended_metrics).
+        self._pending_final: dict[str, Any] | None = None
+        self._pending_metrics: dict[str, Any] = {}
+        self._metrics_flush_seconds = _METRICS_PANEL_FLUSH_SECONDS
+        self._metrics_flush_task: asyncio.Task | None = None
+
     def _unavailable_callback(self, client) -> None:
         super()._unavailable_callback(client)
         if self._resolver_task is not None and not self._resolver_task.done():
@@ -208,6 +246,13 @@ class RenphoQNScale(GattScale):
         self._state_mask = 0
         self._vendor_byte = _DEFAULT_VENDOR_BYTE
         self._stored_records_extended = False
+        # A reading held when the last session ended was delivered by its
+        # flush timer during the cooldown (the deadline is far shorter
+        # than the cooldown). Clear defensively anyway — leftovers must
+        # never leak into a new session.
+        self._cancel_metrics_flush()
+        self._pending_final = None
+        self._pending_metrics = {}
         try:
             self._logger.debug(
                 "ES-CS20M starting session for device %s (%s)",
@@ -329,15 +374,7 @@ class RenphoQNScale(GattScale):
                 payload.hex(),
             )
         elif opcode in (_OP_EXTENDED_METRICS_1, _OP_EXTENDED_METRICS_2):
-            # Not decoded — see the constant definitions in protocol.py.
-            # Logged distinctly so a future capture is easy to find.
-            self._logger.debug(
-                "ES-CS20M R-MSB01 extended-metrics frame (opcode 0x%02x, not "
-                "yet decoded) from %s: %s",
-                opcode,
-                address,
-                payload.hex(),
-            )
+            self._handle_extended_metrics(opcode, payload, address)
         elif opcode == _OP_PROFILE_ACK:
             # Extended-flavor ack of our user-profile command; the only
             # follow-up is the optional stored-measurement query, which the
@@ -521,6 +558,141 @@ class RenphoQNScale(GattScale):
             build_stored_measurement_query(self._vendor_byte), address
         )
 
+    def _handle_extended_metrics(
+        self, opcode: int, payload: bytearray, address: str
+    ) -> None:
+        """Handle a body-composition panel frame (``0x15`` / ``0x16``).
+
+        Metrics-capable scales stream these shortly after the final
+        measurement frame. The panel is accumulated here and, when the
+        closing ``0x16`` lands, the held reading goes out complete —
+        weight and body fat included, its only delivery.
+
+        Only models registered as panel-senders are parsed: the layout is
+        verified per model, and delivering plausible-but-unverified body
+        composition from an unknown one is exactly the silent misparse
+        this library avoids everywhere else. Unregistered senders get a
+        report-it warning instead, mirroring the unrecognized-identifier
+        warning in ``detection.py``.
+        """
+        if not sends_metrics_panel(address):
+            if not self._state_mask & _STATE_METRICS_WARNED:
+                self._state_mask |= _STATE_METRICS_WARNED
+                self._logger.warning(
+                    "ES-CS20M %s sends body-composition frames (opcode "
+                    "0x%02x) but is not registered as a metrics-capable "
+                    "model; ignoring them. Please report this model so its "
+                    "metrics can be surfaced.",
+                    address,
+                    opcode,
+                )
+            return
+        if self._pending_final is None:
+            self._logger.debug(
+                "ES-CS20M metrics frame (opcode 0x%02x) from %s with no "
+                "measurement to attach it to; ignoring: %s",
+                opcode,
+                address,
+                payload.hex(),
+            )
+            return
+        if len(payload) < _LEN_METRICS_PANEL:
+            self._logger.warning(
+                "ES-CS20M metrics frame (opcode 0x%02x) from %s has "
+                "unexpected length; ignoring: %s",
+                opcode,
+                address,
+                payload.hex(),
+            )
+            return
+
+        weight_kg = self._pending_final["weight_kg"]
+        if opcode == _OP_EXTENDED_METRICS_1:
+            panel_a = parse_metrics_panel_a(payload, weight_kg)
+            self._pending_metrics.update(
+                {
+                    BMI_KEY: panel_a.bmi,
+                    BODY_WATER_KEY: panel_a.body_water,
+                    MUSCLE_MASS_KEY: panel_a.muscle_mass,
+                    VISCERAL_FAT_KEY: panel_a.visceral_fat,
+                    BODY_AGE_KEY: panel_a.body_age,
+                    BMR_KEY: panel_a.bmr,
+                    PROTEIN_KEY: panel_a.protein,
+                }
+            )
+            return
+
+        panel_b = parse_metrics_panel_b(payload, weight_kg)
+        self._pending_metrics.update(
+            {
+                BONE_MASS_KEY: panel_b.bone_mass,
+                FAT_FREE_MASS_KEY: panel_b.fat_free_mass,
+                SUBCUTANEOUS_FAT_KEY: panel_b.subcutaneous_fat,
+                SKELETAL_MUSCLE_KEY: panel_b.skeletal_muscle,
+                BODY_SCORE_KEY: panel_b.body_score,
+                BODY_SHAPE_KEY: panel_b.body_shape,
+            }
+        )
+
+        # 0x16 closes the panel: deliver the complete reading.
+        self._cancel_metrics_flush()
+        self._logger.debug(
+            "ES-CS20M on-device body composition received from %s.", address
+        )
+        self._deliver_pending_final()
+
+    def _deliver_pending_final(self) -> None:
+        """Deliver the held reading, merged with whatever panel fields arrived.
+
+        Also sends the end-measurement command: on panel models the
+        official app confirms the measurement only once the panel is
+        complete, and this delivery point is exactly that moment (or the
+        flush deadline, if the panel never came — at most ~1 s late, and
+        a no-op if the scale already disconnected).
+        """
+        final = self._pending_final
+        if final is None:
+            return
+        self._pending_final = None
+        self._fire_and_forget(
+            self._safe_write(build_end_measurement_command(self._vendor_byte)),
+            name="escs20m-end-measurement",
+        )
+        measurements = dict(final["measurements"])
+        measurements.update(self._pending_metrics)
+        self._pending_metrics = {}
+        self._notification_callback(
+            ScaleData(
+                name=final["name"],
+                address=final["address"],
+                display_unit=self.display_unit,
+                measurements=measurements,
+            )
+        )
+
+    def _start_metrics_flush(self, address: str) -> None:
+        """Arm the deadline for delivering a held reading without its panel."""
+        self._cancel_metrics_flush()
+        self._metrics_flush_task = asyncio.create_task(
+            self._metrics_flush(address), name="escs20m-metrics-flush"
+        )
+
+    def _cancel_metrics_flush(self) -> None:
+        if self._metrics_flush_task is not None and not self._metrics_flush_task.done():
+            self._metrics_flush_task.cancel()
+        self._metrics_flush_task = None
+
+    async def _metrics_flush(self, address: str) -> None:
+        await asyncio.sleep(self._metrics_flush_seconds)
+        if self._pending_final is not None:
+            self._logger.warning(
+                "ES-CS20M metrics panel from %s did not complete within %.1fs; "
+                "delivering the reading without it.",
+                address,
+                self._metrics_flush_seconds,
+            )
+            self._deliver_pending_final()
+
     def _add_resistance(
         self,
         measurements: dict[str, Any],
@@ -596,15 +768,6 @@ class RenphoQNScale(GattScale):
                     name="escs20m-resolve-profile",
                 )
         elif frame.status == _MEASUREMENT_STATUS_STABLE_WITH_METRICS:
-            self._logger.debug(
-                "ES-CS20M measurement appears final. Scheduling measurement "
-                "end command."
-            )
-            self._fire_and_forget(
-                self._safe_write(build_end_measurement_command(self._vendor_byte)),
-                name="escs20m-end-measurement",
-            )
-
             metrics: dict[str, int | float | None] = {WEIGHT_KEY: frame.weight_kg}
             if frame.body_fat is not None:
                 metrics[BODY_FAT_KEY] = frame.body_fat
@@ -613,6 +776,38 @@ class RenphoQNScale(GattScale):
                     metrics, frame.resistance_1, frame.resistance_2, address
                 )
 
+            # Models registered as panel-senders stream their
+            # body-composition panel in 0x15/0x16 frames a moment after
+            # this one: hold the reading and deliver it once, merged with
+            # the panel. The end-measurement command is deferred to that
+            # delivery too — the official app confirms these models only
+            # after the panel completes. The flush deadline guarantees
+            # both the delivery and the command even if the panel never
+            # arrives. Every other model is confirmed and delivered
+            # immediately (the app's timing on those), and holds nothing.
+            if sends_metrics_panel(address):
+                self._logger.debug(
+                    "ES-CS20M measurement appears final. Holding for the "
+                    "metrics panel."
+                )
+                self._pending_final = {
+                    "name": name,
+                    "address": address,
+                    "weight_kg": frame.weight_kg,
+                    "measurements": dict(metrics),
+                }
+                self._pending_metrics = {}
+                self._start_metrics_flush(address)
+                return
+
+            self._logger.debug(
+                "ES-CS20M measurement appears final. Scheduling measurement "
+                "end command."
+            )
+            self._fire_and_forget(
+                self._safe_write(build_end_measurement_command(self._vendor_byte)),
+                name="escs20m-end-measurement",
+            )
             self._notification_callback(
                 ScaleData(
                     name=name,

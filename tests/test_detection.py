@@ -11,6 +11,7 @@ from renpho_escs20m.detection import (
     is_aabb_frame,
     is_qn_frame,
     parse_qn_model_code,
+    sends_metrics_panel,
 )
 
 QN = QN_MANUFACTURER_ID
@@ -116,6 +117,17 @@ def test_other_models_report_raw_resistance():
     assert not has_obfuscated_resistance("FF:04:00:12:34:56")
     assert not has_obfuscated_resistance(None, model_code=0x095B)
     assert not has_obfuscated_resistance(None)
+
+
+def test_rmsb01_registered_as_panel_sender():
+    assert sends_metrics_panel("FF:05:00:0A:FB:27")
+    assert sends_metrics_panel(None, model_code=0x0C77)
+
+
+def test_other_models_not_panel_senders():
+    assert not sends_metrics_panel("FF:04:00:12:34:56")
+    assert not sends_metrics_panel(None, model_code=0x095B)
+    assert not sends_metrics_panel(None)
 
 
 def test_unrecognized_identifier_logged_once(caplog):
