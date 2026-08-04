@@ -339,8 +339,9 @@ if protocol is not None:
 
 Frame layouts (manufacturer-data value, company ID already stripped):
 
-- QN: `[0:2]` model identifier, 16-bit big-endian; `[2:5]` varies per
-  advertisement; `[5:11]` device MAC address, little-endian.
+- QN: `[0:2]` model identifier, 16-bit big-endian; `[2:4]` model-dependent
+  constants; `[4]` pending stored-record count, which varies with device
+  state; `[5:11]` device MAC address, little-endian.
 - AABB: `[0:2]` `0xAABB` magic; `[2:8]` device MAC address, forward byte
   order; `[8:]` protocol payload.
 

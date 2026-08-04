@@ -3,7 +3,8 @@
 QN frame (company ID 65535)::
 
     [0:2]  model identifier, 16-bit big-endian (the app's "InternalModel")
-    [2:5]  varies per advertisement
+    [2:4]  model-dependent constants
+    [4]    pending stored-record count (varies with device state)
     [5:11] device MAC address, little-endian
 
 AABB broadcast frame (company IDs in :data:`AABB_COMPANY_IDS`)::
