@@ -21,7 +21,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from renpho_escs20m import RenphoQNScale
+from renpho_escs20m import RenphoQNScale, ScaleSessionError
 from renpho_escs20m.const import (
     COMMAND_CHARACTERISTIC_UUID,
     FFE0_ALT_COMMAND_CHARACTERISTIC_UUID,
@@ -130,13 +130,12 @@ async def test_session_setup_ffe0_without_ffe2_still_subscribes_ffe1():
 
 
 @pytest.mark.asyncio
-async def test_session_setup_errors_when_no_notify_characteristic(caplog):
+async def test_session_setup_raises_when_no_notify_characteristic():
     scale, _ = _make_scale()
     client = _make_client(frozenset())
-    with caplog.at_level("ERROR"):
+    with pytest.raises(ScaleSessionError, match="notification characteristic not found"):
         await _run_session_setup(scale, client)
     client.start_notify.assert_not_awaited()
-    assert "notification characteristic not found" in caplog.text
 
 
 # ---- command-write routing --------------------------------------------------

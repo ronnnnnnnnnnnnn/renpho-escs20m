@@ -38,7 +38,7 @@ from ..const import (
 )
 from ..data import BluetoothScanningMode, ScaleData, WeightUnit
 from ..detection import has_obfuscated_resistance, sends_metrics_panel
-from ..scale import GattScale
+from ..scale import GattScale, ScaleSessionError
 from .protocol import (
     Profile,
     ProfileResolver,
@@ -253,41 +253,39 @@ class RenphoQNScale(GattScale):
         self._cancel_metrics_flush()
         self._pending_final = None
         self._pending_metrics = {}
-        try:
-            self._logger.debug(
-                "ES-CS20M starting session for device %s (%s)",
-                ble_device.name,
-                ble_device.address,
+        self._logger.debug(
+            "ES-CS20M starting session for device %s (%s)",
+            ble_device.name,
+            ble_device.address,
+        )
+        await self._populate_device_metadata(client)
+
+        def handler(char: BleakGATTCharacteristic, data: bytearray) -> None:
+            self._notification_handler(char, data, ble_device.name, ble_device.address)
+
+        # Prefer the FFF0 transport (renpho ES-CS20M), then fall back to
+        # the FFE0 transport (e.g. Arboleaf CS20M).
+        if weight_char := client.services.get_characteristic(
+            NOTIFY_CHARACTERISTIC_UUID
+        ):
+            await client.start_notify(weight_char, handler)
+        elif weight_char := client.services.get_characteristic(
+            FFE0_NOTIFY_CHARACTERISTIC_UUID
+        ):
+            await client.start_notify(weight_char, handler)
+            # The FFE0 transport delivers the pre-measurement and
+            # stored-record frames as indications on FFE2, not on FFE1.
+            if indicate_char := client.services.get_characteristic(
+                FFE0_INDICATE_CHARACTERISTIC_UUID
+            ):
+                await client.start_notify(indicate_char, handler)
+        else:
+            # Service discovery can transiently come back without the notify
+            # characteristic; raising lets the base disconnect and retry on
+            # the next advertisement instead of losing the weigh-in.
+            raise ScaleSessionError(
+                "ES-CS20M notification characteristic not found (FFF1/FFE1)"
             )
-            await self._populate_device_metadata(client)
-
-            def handler(char: BleakGATTCharacteristic, data: bytearray) -> None:
-                self._notification_handler(
-                    char, data, ble_device.name, ble_device.address
-                )
-
-            # Prefer the FFF0 transport (renpho ES-CS20M), then fall back to
-            # the FFE0 transport (e.g. Arboleaf CS20M).
-            if weight_char := client.services.get_characteristic(
-                NOTIFY_CHARACTERISTIC_UUID
-            ):
-                await client.start_notify(weight_char, handler)
-            elif weight_char := client.services.get_characteristic(
-                FFE0_NOTIFY_CHARACTERISTIC_UUID
-            ):
-                await client.start_notify(weight_char, handler)
-                # The FFE0 transport delivers the pre-measurement and
-                # stored-record frames as indications on FFE2, not on FFE1.
-                if indicate_char := client.services.get_characteristic(
-                    FFE0_INDICATE_CHARACTERISTIC_UUID
-                ):
-                    await client.start_notify(indicate_char, handler)
-            else:
-                self._logger.error("ES-CS20M notification characteristic not found")
-                return
-        except Exception as ex:
-            self._logger.exception("%s(%s)", type(ex), ex.args)
-            self._client = None
 
     def _notification_handler(
         self, _: BleakGATTCharacteristic, payload: bytearray, name: str, address: str

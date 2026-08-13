@@ -40,6 +40,17 @@ from .data import BluetoothScanningMode, ScaleData, WeightUnit
 
 _LOGGER = logging.getLogger(__name__)
 
+
+class ScaleSessionError(Exception):
+    """Post-connection session setup failed in a way worth retrying.
+
+    Raised by :meth:`GattScale._start_scale_session` when the connection's
+    GATT database cannot support a session (e.g. service discovery
+    transiently exposed no notify characteristic). The base class responds
+    by disconnecting and retrying on the next advertisement, bounded by
+    ``GattScale._MAX_CONSECUTIVE_SETUP_FAILURES``.
+    """
+
 _SYSTEM = platform.system()
 _IS_LINUX = _SYSTEM == "Linux"
 _IS_MACOS = _SYSTEM == "Darwin"
@@ -242,7 +253,20 @@ class GattScale(RenphoScale, abc.ABC):
     and model-specific setup runs in :meth:`_start_scale_session`; measurements
     then arrive via :meth:`_notification_handler`. An optional cooldown period
     ignores advertisements for a while after a disconnection.
+
+    A connection can succeed while service discovery transiently comes back
+    incomplete, making session setup fail on an otherwise-working scale. Any
+    failure in :meth:`_start_scale_session` therefore disconnects and leaves
+    the cooldown window closed, so the next advertisement (the user is
+    usually still on the scale) reconnects and re-runs discovery. Consecutive
+    failures are bounded: after ``_MAX_CONSECUTIVE_SETUP_FAILURES`` the
+    cooldown is armed, so a scale whose GATT database genuinely lacks the
+    required characteristics doesn't reconnect on every advertisement.
     """
+
+    # Consecutive session-setup failures tolerated before arming the cooldown
+    # instead of retrying on the next advertisement.
+    _MAX_CONSECUTIVE_SETUP_FAILURES = 3
 
     def __init__(
         self,
@@ -274,6 +298,8 @@ class GattScale(RenphoScale, abc.ABC):
         self._client: BleakClient | None = None
         self._initializing: bool = False
         self._max_connect_attempts = max_connect_attempts
+        self._consecutive_setup_failures: int = 0
+        self._expected_disconnect_client: BleakClient | None = None
         self._battery_level: int | None = None
         self._firmware_revision: str | None = None
 
@@ -325,14 +351,59 @@ class GattScale(RenphoScale, abc.ABC):
         if firmware is not None:
             self._firmware_revision = firmware
 
-    def _unavailable_callback(self, _: BleakClient) -> None:
+    def _unavailable_callback(self, client: BleakClient) -> None:
+        # A disconnect we initiated in _teardown_client must not arm the
+        # cooldown: the retry depends on the very next advertisement getting
+        # through. Identity comparison, so a later client's natural
+        # disconnect can never be mistaken for our teardown.
+        if client is self._expected_disconnect_client:
+            self._logger.debug("Scale disconnected (torn down after setup failure)")
+            return
         self._logger.debug("Scale disconnected")
         self._cooldown_end_time = time.time() + self._cooldown_seconds
         self._client = None
 
+    async def _teardown_client(self) -> None:
+        """Best-effort disconnect and clear of the current client."""
+        client, self._client = self._client, None
+        if client is None:
+            return
+        # Set before awaiting: BlueZ fires the disconnect callback during the
+        # disconnect() await itself.
+        self._expected_disconnect_client = client
+        try:
+            await client.disconnect()
+        except Exception:
+            self._logger.debug("Error disconnecting during teardown", exc_info=True)
+
+    def _register_setup_failure(self, reason: str) -> None:
+        self._consecutive_setup_failures += 1
+        if self._consecutive_setup_failures >= self._MAX_CONSECUTIVE_SETUP_FAILURES:
+            self._consecutive_setup_failures = 0
+            self._cooldown_end_time = time.time() + self._cooldown_seconds
+            self._logger.error(
+                "Session setup failed %d consecutive times (%s); giving up "
+                "until the cooldown window (%ss) closes",
+                self._MAX_CONSECUTIVE_SETUP_FAILURES,
+                reason,
+                self._cooldown_seconds,
+            )
+        else:
+            self._logger.warning(
+                "Session setup failed (%s); disconnected, will retry on the "
+                "next advertisement (attempt %d/%d)",
+                reason,
+                self._consecutive_setup_failures,
+                self._MAX_CONSECUTIVE_SETUP_FAILURES,
+            )
+
     @abc.abstractmethod
     async def _start_scale_session(self, ble_device: BLEDevice) -> None:
-        """Post-connection setup: read metadata, register notifications."""
+        """Post-connection setup: read metadata, register notifications.
+
+        Raises :class:`ScaleSessionError` if the connection's GATT database
+        cannot support a session. Any exception makes the base class
+        disconnect and retry on a later advertisement (bounded)."""
 
     @abc.abstractmethod
     def _notification_handler(
@@ -367,10 +438,24 @@ class GattScale(RenphoScale, abc.ABC):
                 return
 
             if not self._client or not self._client.is_connected:
-                self._logger.error("Client not connected, skipping setup")
+                await self._teardown_client()
+                self._register_setup_failure("client not connected")
                 return
 
-            await self._start_scale_session(ble_device)
+            try:
+                await self._start_scale_session(ble_device)
+            except ScaleSessionError as ex:
+                await self._teardown_client()
+                self._register_setup_failure(str(ex))
+                return
+            except Exception as ex:
+                self._logger.exception(
+                    "Session setup raised: %s(%s)", type(ex), ex.args
+                )
+                await self._teardown_client()
+                self._register_setup_failure(type(ex).__name__)
+                return
+            self._consecutive_setup_failures = 0
         finally:
             self._initializing = False
 
