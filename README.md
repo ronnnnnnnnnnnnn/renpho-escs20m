@@ -8,10 +8,11 @@
 This package provides an unofficial interface for interacting with
 Renpho's ES-CS20M scale (and other scales that share the same
 QN-series protocol, including some non-Renpho ones) over Bluetooth Low
-Energy. It also has experimental, weight-only support for a
-broadcast-only ES-CS20M subvariant that speaks a different protocol.
-See the [Device compatibility](#device-compatibility) section for the
-current list of confirmed-working models.
+Energy. It also has experimental support for basic-flavor `0x55aa` GATT
+scales and experimental weight-only support for a broadcast-only
+(`0xaabb`) subvariant. See the
+[Device compatibility](#device-compatibility) section for the current
+list of confirmed-working models.
 
 > **Disclaimer:** This is an unofficial, community-developed library.
 > It is not affiliated with, endorsed by, or connected to Renpho, its
@@ -22,6 +23,14 @@ current list of confirmed-working models.
 > owners. Use of any trade name or trademark is for identification and
 > reference purposes only and does not imply any association with the
 > trademark holder.
+
+> **Health & safety note:** Body-composition values are estimates produced
+> by bioimpedance analysis, not clinical measurements, and this library is
+> not a medical device — do not use its output for medical decisions.
+> Bioimpedance estimates are not valid during pregnancy. For questions about
+> using the scale itself (for example with a pacemaker or another implanted
+> electronic device, or during pregnancy), follow the instructions and
+> warnings supplied by the scale's manufacturer.
 
 [![Buy Me A Coffee](https://www.buymeacoffee.com/assets/img/custom_images/orange_img.png)](https://www.buymeacoffee.com/ronnnnnnn)
 
@@ -53,17 +62,17 @@ depends on which one its hardware uses:
 | Protocol   | Transport | Status          | Features |
 |------------|-----------|-----------------|----------|
 | QN-series  | GATT      | ✅ Supported     | Weight, impedance, body-composition metrics, display-unit control |
+| `0x55aa` (basic) | GATT | 🔬 Experimental | Weight and impedance (display unit observed, not settable) |
 | `0xaabb`   | Broadcast | 🔬 Experimental  | Weight only (display unit observed, not settable) |
 
 ### Identifying your scale
 
 Which protocol a scale speaks doesn't track the marketed model name: several
 Renpho models share the QN-series hardware, while some ES-CS20M *hardware
-revisions* speak a different (broadcast-only or not-yet-supported) protocol.
-The reliable discriminator is the
-**HVIN** (Hardware Version Identification Number) printed on the
-regulatory sticker on the back of the scale, including its trailing
-revision code (e.g. `…MA2` vs `…MB2` vs `…MN`). Some stickers don't
+revisions* speak a different protocol (`0x55aa`, or the broadcast-only
+`0xaabb`).
+The reliable discriminator is the **HVIN** (Hardware Version Identification Number) printed on the regulatory sticker on the back of the scale, including its trailing
+revision code (e.g. `…MA2` vs `…MB1` vs `…MB2` vs `…MN`). Some stickers don't
 print HVIN as a separate field — in that case the same identifier is
 usually embedded as the trailing portion of the **FCC ID** (e.g. FCC
 ID `2A26P-ESCS20MA2` → device code `ESCS20MA2`). The tables below list
@@ -96,10 +105,13 @@ Confirmed-working (QN-series):
 
 Experimental:
 
-| Marketed model | HVIN | FCC ID            | Protocol               |
-|----------------|------|-------------------|------------------------|
-| Arboleaf CS20M | —    | `2ANDX-CS20M`     | QN-series (FFE0 GATT)  |
-| ES-CS20M       | —    | `2APXUES-CS20M`   | `0xaabb` (broadcast)   |
+| Marketed model | HVIN        | FCC ID            | Protocol               |
+|----------------|-------------|-------------------|------------------------|
+| Arboleaf CS20M | —           | `2ANDX-CS20M`     | QN-series (FFE0 GATT)  |
+| ES-CS20M       | —           | `2APXUES-CS20M`   | `0xaabb` (broadcast)   |
+| ES-CS20M       | `ESCS20MB1` | `2A26P-ESCS20MB1` | `0x55aa` (basic)       |
+| ES-26BB-B      | `ES26BBB`   | ?                 | `0x55aa` (basic)       |
+| R-A012         | —           | `2A26P-RA012N`    | `0x55aa` (basic)       |
 
 - **Arboleaf CS20M** — QN-series hardware ships the same wire protocol
   on two GATT service layouts, and the library handles both: the FFF0
@@ -112,20 +124,22 @@ Experimental:
   Supported via `RenphoAABBScale`. Impedance is not reported (for body
   composition calculations see [Broadcast variant](#broadcast-variant)).
   The display unit can be observed but not set.
+- **`0x55aa` basic flavor (ES-CS20MB1, ES-26BB-B, R-A012)** — scales that
+  stream weight and bioimpedance over GATT notify characteristic `0x2A10`
+  on vendor service `0x1A10`. Supported via `Renpho55AAScale`.
+  
 
-Known-incompatible — `0x55aa` (not yet supported):
+Known-incompatible — `0x55aa` extended flavor (not yet supported):
 
 | Marketed model | HVIN        | FCC ID            | Protocol (first payload bytes) |
 |----------------|-------------|-------------------|--------------------------------|
 | ES-CS20M       | `ESCS20MB2` | `2A26P-ESCS20MB2` | `0x55aa` (extended flavor)     |
-| ES-26BB-B      | `ES26BBB`   | ?                 | `0x55aa` (basic flavor)        |
-| R-A012         | —           | `2A26P-RA012N`    | `0x55aa` (basic flavor)        |
 
 The **Protocol** column records the first bytes of the notification frames
 each unsupported variant emits — a rough fingerprint of the (different) BLE
 protocol it speaks, kept for reference and possible future support work.
 
-The pattern so far: marketed model name is unreliable, but the HVIN — and specifically its revision suffix (`A2`, `B2`, `N`…) — tracks the actual hardware and apparently also the protocol. If your Renpho scale HVIN ends in `A2` or `N`, this library will likely work with it; if it ends in some other suffix, try it out to see if it works and report back on the issue tracker.
+The pattern so far: marketed model name is unreliable, but the HVIN — and specifically its revision suffix (`A2`, `B1`, `B2`, `N`…) — tracks the actual hardware and apparently also the protocol. If your Renpho scale HVIN ends in `A2`, `B1`, or `N`, this library will likely work with it; if it ends in some other suffix, try it out to see if it works and report back on the issue tracker.
 
 > This library may also work with other QN-Scale varieties utilizing the same protocol (on either GATT layout), including non-Renpho ones. Feel free to report compatibility results on the issue tracker.
 
@@ -285,6 +299,40 @@ the bootstrap profile (no body fat) before your resolved profile
 lands. If the BLE session ends while the resolver is still in flight,
 the library cancels the resolver task to avoid leaking work.
 
+### 0x55aa variant (basic flavor)
+
+Basic-flavor `0x55aa` scales (e.g. ES-CS20MB1, R-A012, ES-26BB-B) stream
+weight and resistance over GATT notifications with no profile write required:
+
+```python
+import asyncio
+from renpho_escs20m import (
+    Renpho55AAScale,
+    RESISTANCE_1_KEY,
+    ScaleData,
+    WEIGHT_KEY,
+)
+
+
+def notification_callback(data: ScaleData):
+    weight = data.measurements.get(WEIGHT_KEY)
+    resistance = data.measurements.get(RESISTANCE_1_KEY)
+    if resistance is not None:
+        print(f"weight={weight} kg  resistance={resistance} Ω")
+    else:
+        print(f"weight={weight} kg")
+
+
+async def main():
+    scale = Renpho55AAScale('XX:XX:XX:XX:XX:XX', notification_callback)
+    await scale.async_start()
+    await asyncio.sleep(30)
+    await scale.async_stop()
+
+
+asyncio.run(main())
+```
+
 ### Broadcast variant
 
 The broadcast-only `0xaabb` subvariant uses a different client,
@@ -324,9 +372,9 @@ matters, and ~500 reproduces pretty closely what the official Renpho app shows.
 
 `detect_protocol()` classifies a BLE advertisement (local name,
 manufacturer data, and address) as `ScaleProtocol.QN`,
-`ScaleProtocol.AABB`, or `None` if it isn't a recognized scale. Pair it
-with `SCALE_CLASSES` to pick the right client class without hardcoding
-`if`/`else` branches:
+`ScaleProtocol.X55AA`, `ScaleProtocol.AABB`, or `None` if it isn't a
+recognized scale. Pair it with `SCALE_CLASSES` to pick the right client class
+without hardcoding `if`/`else` branches:
 
 ```python
 from renpho_escs20m import SCALE_CLASSES, detect_protocol
@@ -339,11 +387,14 @@ if protocol is not None:
 
 Frame layouts (manufacturer-data value, company ID already stripped):
 
-- QN: `[0:2]` model identifier, 16-bit big-endian; `[2:4]` model-dependent
-  constants; `[4]` pending stored-record count, which varies with device
-  state; `[5:11]` device MAC address, little-endian.
-- AABB: `[0:2]` `0xAABB` magic; `[2:8]` device MAC address, forward byte
-  order; `[8:]` protocol payload.
+- QN (company ID 65535): `[0:2]` model identifier, 16-bit big-endian; `[2:4]`
+  model-dependent constants; `[4]` pending stored-record count, which varies
+  with device state; `[5:11]` device MAC address, little-endian.
+- 0x55aa (company ID `0x1A10`): `[0:2]` fixed `00 04` prefix; `[2:4]` model
+  identifier, 16-bit big-endian (`0x0003` = basic flavor); `[4:10]` device MAC
+  address, forward byte order; `[10:]` trailing bytes.
+- AABB (company ID 65535): `[0:2]` `0xAABB` magic; `[2:8]` device MAC address,
+  forward byte order; `[8:]` protocol payload.
 
 Known QN model identifiers, observed in real advertisement captures:
 
@@ -362,7 +413,7 @@ identifier registry grows.
 
 ## API reference
 
-### Scale client
+### QN variant
 
 - `RenphoQNScale(address, callback, display_unit, *, profile=None,
   scanning_mode=BluetoothScanningMode.ACTIVE, …)` — BLE scale client.
@@ -432,6 +483,28 @@ identifier registry grows.
 - `BluetoothScanningMode` — `ACTIVE` (default) / `PASSIVE`, passed via
   the `scanning_mode` kwarg. `PASSIVE` only takes effect on Linux
   (BlueZ); other platforms fall back to active.
+
+### 0x55aa variant (basic flavor, experimental)
+
+- `Renpho55AAScale(address, callback, *, clear_stored_measurements=False,
+  scanning_mode=BluetoothScanningMode.ACTIVE, …)` — client for the `0x55aa`
+  basic-flavor GATT variant (LeFu hardware). It subscribes to notification
+  characteristic `0x2A10` on vendor service `0x1A10`. Differences from
+  `RenphoQNScale`:
+- Operates in notify-only mode by default: no writes are sent to the scale.
+- `ScaleData.measurements` contains `WEIGHT_KEY` (always kg) plus
+  `RESISTANCE_1_KEY` (ohms) when bioimpedance produces a non-zero reading.
+- Body fat is not computed on-device; compute it off-scale with
+  `calculate_body_fat()`.
+- `ScaleData.display_unit` reflects the unit reported in device status frames
+  (observed from the scale, currently not settable by the client).
+- App-managed scale modes (such as pregnancy and hold-baby modes) are not
+  supported: measurements taken in those modes are skipped with a warning.
+  The client never changes scale settings or modes.
+- Stored offline records (`0x15`) sent at connect are logged and discarded by
+  default. Setting `clear_stored_measurements=True` acknowledges each record
+  to drain the scale's offline store (best-effort; left off by default so
+  the official app can collect them).
 
 ### Broadcast variant (experimental)
 
@@ -616,6 +689,7 @@ scan on
 ## Acknowledgments
 
 - R-MSB01 support contributed by [@Jaano](https://github.com/Jaano) — thank you!
+- `0x55aa` basic flavor support contributed by [@norsoa](https://github.com/norsoa) and [@NicolasLM](https://github.com/NicolasLM) — thank you!
 
 ## Support the project
 

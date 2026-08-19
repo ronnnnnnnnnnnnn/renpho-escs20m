@@ -13,6 +13,14 @@ FFE0_INDICATE_CHARACTERISTIC_UUID = "0000ffe2-0000-1000-8000-00805f9b34fb"
 FFE0_COMMAND_CHARACTERISTIC_UUID = "0000ffe3-0000-1000-8000-00805f9b34fb"
 FFE0_ALT_COMMAND_CHARACTERISTIC_UUID = "0000ffe4-0000-1000-8000-00805f9b34fb"
 
+# The 0x55aa variant (LeFu hardware) exposes vendor service 0x1A10: readings
+# arrive as notifications on 2A10; 2A11 is the write characteristic
+# (write-with-response only). The basic-flavor client is notify-only and
+# never writes; the command UUID is kept for the extended flavor, whose
+# on-device body composition requires a profile write.
+X55AA_NOTIFY_CHARACTERISTIC_UUID = "00002a10-0000-1000-8000-00805f9b34fb"
+X55AA_COMMAND_CHARACTERISTIC_UUID = "00002a11-0000-1000-8000-00805f9b34fb"
+
 # Standard BLE SIG characteristics on the scale's Device Information services.
 BATTERY_LEVEL_CHARACTERISTIC_UUID = "00002a19-0000-1000-8000-00805f9b34fb"
 FIRMWARE_REVISION_CHARACTERISTIC_UUID = "00002a26-0000-1000-8000-00805f9b34fb"
@@ -49,6 +57,8 @@ __all__ = [
     "FFE0_INDICATE_CHARACTERISTIC_UUID",
     "FFE0_COMMAND_CHARACTERISTIC_UUID",
     "FFE0_ALT_COMMAND_CHARACTERISTIC_UUID",
+    "X55AA_NOTIFY_CHARACTERISTIC_UUID",
+    "X55AA_COMMAND_CHARACTERISTIC_UUID",
     "BATTERY_LEVEL_CHARACTERISTIC_UUID",
     "FIRMWARE_REVISION_CHARACTERISTIC_UUID",
     "WEIGHT_KEY",

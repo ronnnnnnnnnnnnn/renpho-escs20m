@@ -32,6 +32,7 @@ SHORT_65535 = bytes.fromhex("f3a407e0aa09")
 def test_protocol_values_are_stable():
     assert ScaleProtocol.QN.value == "qn"
     assert ScaleProtocol.AABB.value == "aabb"
+    assert ScaleProtocol.X55AA.value == "x55aa"
 
 
 def test_parse_qn_model_code():
@@ -140,7 +141,7 @@ def test_unrecognized_identifier_logged_once(caplog):
             == ScaleProtocol.QN
         )
         detect_protocol("QN-Scale1", {QN: FOREIGN_QN}, "04:AC:44:0B:AA:07")
-    assert caplog.text.count("unrecognized model identifier 294") == 1  # 0x0126
+    assert caplog.text.count("unrecognized model identifier 0x0126 (294)") == 1
 
 
 def test_public_api_exports():
@@ -151,5 +152,6 @@ def test_public_api_exports():
     assert set(lib.SCALE_CLASSES) == set(ScaleProtocol)
     assert lib.SCALE_CLASSES[ScaleProtocol.QN] is lib.RenphoQNScale
     assert lib.SCALE_CLASSES[ScaleProtocol.AABB] is lib.RenphoAABBScale
+    assert lib.SCALE_CLASSES[ScaleProtocol.X55AA] is lib.Renpho55AAScale
     for name in lib.__all__:
         assert hasattr(lib, name), f"__all__ exports missing attribute: {name}"
