@@ -13,8 +13,17 @@ AABB broadcast frame (company IDs in :data:`AABB_COMPANY_IDS`)::
     [2:8]  device MAC address, forward byte order
     [8:]   protocol payload (see ``xaabb.protocol``)
 
-Both frame families ride the same generic 0xFFFF (65535) company ID — QN
-and AABB are disambiguated by the 0xAABB magic prefix, not by company ID.
+0x55aa frame (company IDs in :data:`X55AA_COMPANY_IDS`)::
+
+    [0:2]  fixed 00 04 prefix
+    [2:4]  model identifier, 16-bit big-endian (0x0003 = the confirmed
+           basic-flavor units; extended-flavor units advertise others)
+    [4:10] device MAC address, forward byte order
+    [10:]  trailing bytes (firmware/revision)
+
+Those two frame families ride the same generic 0xFFFF (65535) company ID — QN
+and AABB are disambiguated by the 0xAABB magic prefix, not by company ID. The
+0x55aa variant advertises under its own vendor company ID instead.
 
 Company ID 65535 is a catch-all used by many vendors, so for QN frames the
 embedded MAC is validated against the device address before the identifier
@@ -29,6 +38,10 @@ import fnmatch
 import logging
 from enum import StrEnum
 
+from .x55aa.protocol import KNOWN_BASIC_MODEL_IDS as X55AA_KNOWN_MODEL_IDS
+from .x55aa.protocol import SUPPORTED_COMPANY_IDS as X55AA_COMPANY_IDS
+from .x55aa.protocol import is_advertisement as _is_x55aa_advertisement
+from .x55aa.protocol import parse_model_id as _parse_x55aa_model_id
 from .xaabb.protocol import SUPPORTED_COMPANY_IDS as AABB_COMPANY_IDS
 
 _LOGGER = logging.getLogger(__name__)
@@ -46,6 +59,7 @@ class ScaleProtocol(StrEnum):
 
     QN = "qn"
     AABB = "aabb"
+    X55AA = "x55aa"
 
 
 def _mac_bytes(address: str) -> bytes | None:
@@ -83,6 +97,15 @@ def is_qn_frame(payload: bytes, address: str | None = None) -> bool:
         if mac is not None and payload[_QN_MAC_SLICE] != mac[::-1]:
             return False
     return True
+
+
+def is_x55aa_frame(payload: bytes, address: str | None = None) -> bool:
+    """Return True if ``payload`` has the 0x55aa advertisement shape.
+
+    When ``address`` is a real MAC, the forward-order echo at bytes 4-10
+    must match it.
+    """
+    return _is_x55aa_advertisement(payload, address)
 
 
 def is_aabb_frame(payload: bytes, address: str | None = None) -> bool:
@@ -208,6 +231,33 @@ def detect_protocol(
         if payload is not None and is_aabb_frame(payload, address):
             return ScaleProtocol.AABB
 
+    for company in X55AA_COMPANY_IDS:
+        payload = manufacturer_data.get(company)
+        if payload is not None and is_x55aa_frame(payload, address):
+            model_id = _parse_x55aa_model_id(payload)
+            if model_id in X55AA_KNOWN_MODEL_IDS:
+                return ScaleProtocol.X55AA
+            # A 0x55aa-family unit whose model id isn't supported yet
+            # (e.g. the extended flavor). Deliberately unclassified:
+            # connecting would hold the scale's BLE link away from the
+            # official app without producing readings. The frame is
+            # conclusive family evidence, so the name/address fallbacks
+            # below must not reclassify it as QN.
+            if (
+                model_id is not None
+                and (company, model_id) not in _reported_identifiers
+            ):
+                _reported_identifiers.add((company, model_id))
+                _LOGGER.warning(
+                    "Detected a 0x55aa-family scale with unsupported model "
+                    "identifier 0x%04x (%d) — not classified. If this is a "
+                    "scale you can capture, please report it on the issue "
+                    "tracker.",
+                    model_id,
+                    model_id,
+                )
+            return None
+
     qn_code = None
     payload = manufacturer_data.get(QN_MANUFACTURER_ID)
     if payload is not None and is_qn_frame(payload, address):
@@ -227,10 +277,12 @@ def detect_protocol(
                     _reported_identifiers.add((QN_MANUFACTURER_ID, qn_code))
                     _LOGGER.warning(
                         "Detected likely %s scale via fallback matcher %r with "
-                        "unrecognized model identifier %d — please report this "
-                        "identifier so it can be added to the registry.",
+                        "unrecognized model identifier 0x%04x (%d) — please "
+                        "report this identifier so it can be added to the "
+                        "registry.",
                         protocol.value,
                         pattern,
+                        qn_code,
                         qn_code,
                     )
                 return protocol

@@ -139,6 +139,22 @@ async def test_handle_measurement_only_sends_end_measurement_for_stable_with_met
     assert callback.call_count == 1
 
 
+@pytest.mark.asyncio
+async def test_extended_measurement_with_no_ble_name_reports_empty_string():
+    """Same guard as the basic flavor: a nameless advertisement must not
+    leak ``None`` into :attr:`ScaleData.name`."""
+    scale, callback = _make_scale()
+    scale._safe_write = AsyncMock()
+
+    scale._handle_extended_measurement(
+        _measurement_payload(_MEASUREMENT_STATUS_STABLE_WITH_METRICS),
+        None,
+        "00:11:22:33:44:55",
+    )
+    await asyncio.sleep(0)
+    assert callback.call_args[0][0].name == ""
+
+
 def _cmd_hex(cmd: bytearray) -> str:
     return cmd.hex()
 
@@ -666,6 +682,20 @@ async def test_escs20mn_final_frame_fires_callback_and_ends():
         RESISTANCE_2_KEY: 500,
     }
     scale._safe_write.assert_awaited_once_with(build_end_measurement_command())
+
+
+@pytest.mark.asyncio
+async def test_escs20mn_final_frame_with_no_ble_name_reports_empty_string():
+    """bleak's ``BLEDevice.name`` is ``str | None``; a nameless advertisement
+    must still produce a ``str`` on :attr:`ScaleData.name`, not ``None``."""
+    scale, callback = _mn_scale()
+    scale._handle_basic_measurement(
+        bytearray.fromhex("100bff15810101fc01f4a3"),
+        None,
+        "ff:03:00:67:aa:03",
+    )
+    await asyncio.sleep(0)
+    assert callback.call_args[0][0].name == ""
 
 
 @pytest.mark.asyncio

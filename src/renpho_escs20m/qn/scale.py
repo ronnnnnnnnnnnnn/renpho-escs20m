@@ -288,7 +288,11 @@ class RenphoQNScale(GattScale):
             )
 
     def _notification_handler(
-        self, _: BleakGATTCharacteristic, payload: bytearray, name: str, address: str
+        self,
+        _: BleakGATTCharacteristic,
+        payload: bytearray,
+        name: str | None,
+        address: str,
     ) -> None:
         self._logger.debug("ES-CS20M RX payload: %s", payload.hex())
         if len(payload) < 2:
@@ -661,7 +665,7 @@ class RenphoQNScale(GattScale):
         self._pending_metrics = {}
         self._notification_callback(
             ScaleData(
-                name=final["name"],
+                name=final["name"] or "",
                 address=final["address"],
                 display_unit=self.display_unit,
                 measurements=measurements,
@@ -717,7 +721,7 @@ class RenphoQNScale(GattScale):
         measurements[RESISTANCE_2_KEY] = resistance_2
 
     def _handle_extended_measurement(
-        self, payload: bytearray, name: str, address: str
+        self, payload: bytearray, name: str | None, address: str
     ) -> None:
         """Handle an extended-flavor measurement broadcast (``10 0e``, 14 bytes;
         the 15-byte ``10 0f`` variant carries one extra unread byte)."""
@@ -808,7 +812,7 @@ class RenphoQNScale(GattScale):
             )
             self._notification_callback(
                 ScaleData(
-                    name=name,
+                    name=name or "",
                     address=address,
                     display_unit=self.display_unit,
                     measurements=metrics,
@@ -822,7 +826,7 @@ class RenphoQNScale(GattScale):
             )
 
     def _handle_basic_measurement(
-        self, payload: bytearray, name: str, address: str
+        self, payload: bytearray, name: str | None, address: str
     ) -> None:
         """Handle a basic-flavor measurement broadcast (``10 0b``, 11 bytes)."""
         if len(payload) < _LEN_BASIC_MEASUREMENT:
@@ -897,7 +901,7 @@ class RenphoQNScale(GattScale):
             self._add_resistance(data, frame.resistance_1, frame.resistance_2, address)
         self._notification_callback(
             ScaleData(
-                name=name,
+                name=name or "",
                 address=address,
                 display_unit=self.display_unit,
                 measurements=data,
