@@ -24,13 +24,15 @@ list of confirmed-working models.
 > reference purposes only and does not imply any association with the
 > trademark holder.
 
-> **Health & safety note:** Body-composition values are estimates produced
-> by bioimpedance analysis, not clinical measurements, and this library is
-> not a medical device — do not use its output for medical decisions.
-> Bioimpedance estimates are not valid during pregnancy. For questions about
-> using the scale itself (for example with a pacemaker or another implanted
-> electronic device, or during pregnancy), follow the instructions and
-> warnings supplied by the scale's manufacturer.
+> **Health & safety note:** Body-composition scales measure by passing a low
+> electrical current through the body. This project does not support the
+> manufacturers' zero-current, pregnancy or hold-baby modes, and a mode
+> enabled in the manufacturer's app is not guaranteed to be in effect while the
+> scale is used through this library. Use may be unsuitable for anyone who might be
+> pregnant or who has a pacemaker or other implanted medical device.
+> Body-composition values are bioimpedance estimates, not clinical
+> measurements, and this library is not a medical device; do not use its output
+> for medical decisions.
 
 [![Buy Me A Coffee](https://www.buymeacoffee.com/assets/img/custom_images/orange_img.png)](https://www.buymeacoffee.com/ronnnnnnn)
 
@@ -500,7 +502,6 @@ identifier registry grows.
   (observed from the scale, currently not settable by the client).
 - App-managed scale modes (such as pregnancy and hold-baby modes) are not
   supported: measurements taken in those modes are skipped with a warning.
-  The client never changes scale settings or modes.
 - Stored offline records (`0x15`) sent at connect are logged and discarded by
   default. Setting `clear_stored_measurements=True` acknowledges each record
   to drain the scale's offline store (best-effort; left off by default so
@@ -697,6 +698,17 @@ If you find this unofficial project helpful, consider buying me a
 coffee! Your support helps maintain and improve this library.
 
 [![Buy Me A Coffee](https://www.buymeacoffee.com/assets/img/custom_images/orange_img.png)](https://www.buymeacoffee.com/ronnnnnnn)
+
+## Disclaimer
+
+This is an independent project developed by the community. It is not endorsed
+by, directly affiliated with, maintained, authorized or sponsored by Renpho or
+any of its affiliates or subsidiaries. All product and company names are the
+registered trademarks of their original owners. The use of any trade name or
+trademark is for identification and reference purposes only and does not imply
+any association with the trademark holder of their product brand.
+
+This software is provided as is, without warranty of any kind.
 
 ## License
 
