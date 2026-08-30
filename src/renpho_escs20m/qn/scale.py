@@ -770,6 +770,17 @@ class RenphoQNScale(GattScale):
                     name="escs20m-resolve-profile",
                 )
         elif frame.status == _MEASUREMENT_STATUS_STABLE_WITH_METRICS:
+            if (
+                self._profile_resolver is not None
+                and not self._state_mask & _STATE_PROFILE_RESOLVING
+            ):
+                self._logger.debug(
+                    "ES-CS20M final frame from %s arrived without a "
+                    "preceding stable frame; the profile resolver was never "
+                    "invoked (too late to run body composition this "
+                    "session).",
+                    address,
+                )
             metrics: dict[str, int | float | None] = {WEIGHT_KEY: frame.weight_kg}
             if frame.body_fat is not None:
                 metrics[BODY_FAT_KEY] = frame.body_fat

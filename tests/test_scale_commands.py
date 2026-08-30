@@ -155,6 +155,55 @@ async def test_extended_measurement_with_no_ble_name_reports_empty_string():
     assert callback.call_args[0][0].name == ""
 
 
+@pytest.mark.asyncio
+async def test_final_without_preceding_stable_frame_logs_diagnostic(caplog):
+    """Hardware report (integration issue #19): a session can open with the
+    status=2 final as its first measurement frame — the stable phase happened
+    before the session was ready, so the detection-mode resolver trigger
+    never fired. The library flags that explicitly so field logs are
+    self-diagnosing; delivery itself is unchanged (callers route unresolved
+    readings themselves)."""
+    resolver = AsyncMock(return_value=None)
+    scale, callback = _make_scale(profile=resolver)
+    scale._safe_write = AsyncMock()
+
+    with caplog.at_level(logging.DEBUG):
+        scale._handle_extended_measurement(
+            _measurement_payload(_MEASUREMENT_STATUS_STABLE_WITH_METRICS),
+            "Renpho ES-CS20M",
+            "00:11:22:33:44:55",
+        )
+    await asyncio.sleep(0)
+
+    assert "without a preceding stable frame" in caplog.text
+    resolver.assert_not_awaited()  # log-only: too late to resolve this session
+    assert callback.call_count == 1  # delivery unchanged
+
+
+@pytest.mark.asyncio
+async def test_final_after_stable_frame_does_not_log_diagnostic(caplog):
+    resolver = AsyncMock(return_value=None)
+    scale, callback = _make_scale(profile=resolver)
+    scale._safe_write = AsyncMock()
+
+    with caplog.at_level(logging.DEBUG):
+        scale._handle_extended_measurement(
+            _measurement_payload(_MEASUREMENT_STATUS_STABLE),
+            "Renpho ES-CS20M",
+            "00:11:22:33:44:55",
+        )
+        await asyncio.sleep(0)
+        scale._handle_extended_measurement(
+            _measurement_payload(_MEASUREMENT_STATUS_STABLE_WITH_METRICS),
+            "Renpho ES-CS20M",
+            "00:11:22:33:44:55",
+        )
+    await asyncio.sleep(0)
+
+    assert "without a preceding stable frame" not in caplog.text
+    assert callback.call_count == 1
+
+
 def _cmd_hex(cmd: bytearray) -> str:
     return cmd.hex()
 
