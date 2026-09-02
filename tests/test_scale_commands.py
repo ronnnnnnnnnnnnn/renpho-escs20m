@@ -204,6 +204,49 @@ async def test_final_after_stable_frame_does_not_log_diagnostic(caplog):
     assert callback.call_count == 1
 
 
+@pytest.mark.asyncio
+async def test_extended_duplicate_final_frame_ignored():
+    """Hardware-observed (integration issue #19 follow-up log): the extended
+    flavor can repeat the identical status=2 final ~200 ms later. Mirror the
+    basic flavor's guard — one callback and one end command per session, or
+    every duplicate lands twice in the caller's history."""
+    scale, callback = _make_scale()
+    scale._safe_write = AsyncMock()
+
+    for _ in range(2):
+        scale._handle_extended_measurement(
+            _measurement_payload(_MEASUREMENT_STATUS_STABLE_WITH_METRICS),
+            "Renpho ES-CS20M",
+            "00:11:22:33:44:55",
+        )
+        await asyncio.sleep(0)
+
+    assert callback.call_count == 1
+    scale._safe_write.assert_awaited_once_with(build_end_measurement_command())
+
+
+@pytest.mark.asyncio
+async def test_panel_sender_duplicate_final_does_not_drop_panel_fields():
+    """On a panel model a repeated final must not restart the hold: without
+    a guard it wipes the panel fields already accumulated from 0x15."""
+    scale, callback = _make_scale()
+    scale._safe_write = AsyncMock()
+    scale._metrics_flush_seconds = 0.05
+
+    for hx in (RMSB01_FINAL, RMSB01_METRICS_A, RMSB01_FINAL, RMSB01_METRICS_B):
+        scale._notification_handler(
+            MagicMock(), bytearray.fromhex(hx), "Renpho-Scale", "FF:05:00:0A:FB:27"
+        )
+        await asyncio.sleep(0)
+    await asyncio.sleep(0.1)
+
+    assert callback.call_count == 1
+    measurements = callback.call_args[0][0].measurements
+    assert BMI_KEY in measurements  # from 0x15, before the duplicate final
+    assert BONE_MASS_KEY in measurements  # from 0x16, after it
+    scale._safe_write.assert_awaited_once_with(build_end_measurement_command())
+
+
 def _cmd_hex(cmd: bytearray) -> str:
     return cmd.hex()
 

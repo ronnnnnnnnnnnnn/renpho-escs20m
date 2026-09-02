@@ -93,6 +93,12 @@ _STATE_STORED_QUERY = 32
 # Set once this session has warned about metrics frames from a model not
 # registered as a panel-sender, so the warning fires once, not per frame.
 _STATE_METRICS_WARNED = 64
+# Set once the extended-flavor final (status 2) measurement frame has been
+# handled. The scale can repeat the identical final ~200 ms later
+# (hardware-observed); without the guard each repeat fires the callback (a
+# duplicate reading in the caller's history) and, on panel models, restarts
+# the hold — wiping panel fields already accumulated.
+_STATE_EXTENDED_FINAL = 128
 
 # On the FFE0 transport command writes are split across two characteristics
 # (capture-verified): set-time (0x20) and the stored-measurement query
@@ -770,6 +776,15 @@ class RenphoQNScale(GattScale):
                     name="escs20m-resolve-profile",
                 )
         elif frame.status == _MEASUREMENT_STATUS_STABLE_WITH_METRICS:
+            if self._state_mask & _STATE_EXTENDED_FINAL:
+                self._logger.debug(
+                    "ES-CS20M duplicate final frame from %s; already handled, "
+                    "ignoring: %s",
+                    address,
+                    payload.hex(),
+                )
+                return
+            self._state_mask |= _STATE_EXTENDED_FINAL
             if (
                 self._profile_resolver is not None
                 and not self._state_mask & _STATE_PROFILE_RESOLVING

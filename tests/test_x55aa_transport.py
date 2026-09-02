@@ -333,6 +333,40 @@ async def test_a_new_settling_phase_rearms_the_final():
 
 
 @pytest.mark.asyncio
+async def test_identical_repeated_final_is_quietly_ignored(caplog):
+    """The R-A012 repeats its final byte-for-byte; that is expected hardware
+    behaviour and must not be reported."""
+    scale, callback = _make_scale()
+    client = _make_client()
+    await _run_session_setup(scale, client)
+
+    with caplog.at_level(logging.DEBUG):
+        _feed(scale, _final(0x01, 7025, 586), _final(0x01, 7025, 586))
+
+    callback.assert_called_once()
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+
+@pytest.mark.asyncio
+async def test_differing_repeated_final_is_reported(caplog):
+    """A later final with different contents is still ignored (first wins), but
+    surfaced as a warning so a firmware that finalizes before its impedance
+    pass shows up in field logs instead of silently losing the resistance."""
+    scale, callback = _make_scale()
+    client = _make_client()
+    await _run_session_setup(scale, client)
+
+    with caplog.at_level(logging.WARNING):
+        _feed(scale, _final(0x01, 7025, 0), _final(0x01, 7025, 586))
+
+    callback.assert_called_once()
+    assert callback.call_args[0][0].measurements == {WEIGHT_KEY: 70.25}
+    warnings = [r for r in caplog.records if "differ" in r.message]
+    assert len(warnings) == 1
+    assert "70.25" in warnings[0].message and "586" in warnings[0].message
+
+
+@pytest.mark.asyncio
 async def test_unsupported_statuses_are_skipped_with_one_warning_each(caplog):
     scale, callback = _make_scale()
     client = _make_client()

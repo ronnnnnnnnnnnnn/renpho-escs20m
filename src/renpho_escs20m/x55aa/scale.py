@@ -41,6 +41,7 @@ from .protocol import (
     CMD_STATUS_ALT,
     CMD_STORED_RECORD,
     Frame,
+    Measurement,
     iter_frames,
     parse_measurement,
     parse_status,
@@ -107,6 +108,7 @@ class Renpho55AAScale(GattScale):
         self._write_lock = asyncio.Lock()
         self._buffer = bytearray()
         self._final_fired = False
+        self._final_measurement: Measurement | None = None
         self._warned_statuses: set[int] = set()
 
     @GattScale.display_unit.setter
@@ -125,6 +127,7 @@ class Renpho55AAScale(GattScale):
 
         self._buffer.clear()
         self._final_fired = False
+        self._final_measurement = None
         self._warned_statuses.clear()
         self._command_char = None
 
@@ -198,6 +201,7 @@ class Renpho55AAScale(GattScale):
             # A new settling phase re-arms the final for scales that stay
             # connected across weigh-ins.
             self._final_fired = False
+            self._final_measurement = None
             self._logger.debug(
                 "0x55aa settling frame from %s: weight=%.2f kg",
                 address,
@@ -225,12 +229,33 @@ class Renpho55AAScale(GattScale):
             return
 
         if self._final_fired:
-            self._logger.debug(
-                "0x55aa duplicate final frame from %s; already handled",
-                address,
-            )
+            first = self._final_measurement
+            if first is not None and (
+                first.weight_kg != measurement.weight_kg
+                or first.resistance != measurement.resistance
+            ):
+                # Every repeated final captured so far has been byte-identical.
+                # One that differs is worth a report: a firmware that finalizes
+                # before its impedance pass would lose the resistance here.
+                self._logger.warning(
+                    "0x55aa repeated final frame from %s differs from the one "
+                    "already reported (%.2f kg, %d ohm -> %.2f kg, %d ohm); "
+                    "ignoring it — please report this on the issue tracker: %s",
+                    address,
+                    first.weight_kg,
+                    first.resistance,
+                    measurement.weight_kg,
+                    measurement.resistance,
+                    frame.payload.hex(),
+                )
+            else:
+                self._logger.debug(
+                    "0x55aa duplicate final frame from %s; already handled",
+                    address,
+                )
             return
         self._final_fired = True
+        self._final_measurement = measurement
 
         measurements: dict[str, str | float | None] = {
             WEIGHT_KEY: measurement.weight_kg
@@ -325,6 +350,7 @@ class Renpho55AAScale(GattScale):
     def _unavailable_callback(self, client: BleakClient) -> None:
         self._buffer.clear()
         self._final_fired = False
+        self._final_measurement = None
         self._warned_statuses.clear()
         self._command_char = None
         super()._unavailable_callback(client)
