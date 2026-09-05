@@ -64,7 +64,7 @@ depends on which one its hardware uses:
 | Protocol   | Transport | Status          | Features |
 |------------|-----------|-----------------|----------|
 | QN-series  | GATT      | ✅ Supported     | Weight, impedance, body-composition metrics, display-unit control |
-| `0x55aa` (basic) | GATT | 🔬 Experimental | Weight and impedance (display unit observed, not settable) |
+| `0x55aa` (basic) | GATT | 🔬 Experimental | Weight and impedance, display-unit control |
 | `0xaabb`   | Broadcast | 🔬 Experimental  | Weight only (display unit observed, not settable) |
 
 ### Identifying your scale
@@ -114,6 +114,7 @@ Experimental:
 | ES-CS20M       | `ESCS20MB1` | `2A26P-ESCS20MB1` | `0x55aa` (basic)       |
 | ES-26BB-B      | `ES26BBB`   | ?                 | `0x55aa` (basic)       |
 | R-A012         | —           | `2A26P-RA012N`    | `0x55aa` (basic)       |
+| R-A016         | —           | `2A26P-RA016`     | `0x55aa` (basic)       |
 
 - **Arboleaf CS20M** — QN-series hardware ships the same wire protocol
   on two GATT service layouts, and the library handles both: the FFF0
@@ -126,9 +127,9 @@ Experimental:
   Supported via `RenphoAABBScale`. Impedance is not reported (for body
   composition calculations see [Broadcast variant](#broadcast-variant)).
   The display unit can be observed but not set.
-- **`0x55aa` basic flavor (ES-CS20MB1, ES-26BB-B, R-A012)** — scales that
-  stream weight and bioimpedance over GATT notify characteristic `0x2A10`
-  on vendor service `0x1A10`. Supported via `Renpho55AAScale`.
+- **`0x55aa` basic flavor (ES-CS20MB1, ES-26BB-B, R-A012, R-A016)** — scales
+  that stream weight and bioimpedance over GATT notify characteristic
+  `0x2A10` on vendor service `0x1A10`. Supported via `Renpho55AAScale`.
   
 
 Known-incompatible — `0x55aa` extended flavor (not yet supported):
@@ -303,8 +304,9 @@ the library cancels the resolver task to avoid leaking work.
 
 ### 0x55aa variant (basic flavor)
 
-Basic-flavor `0x55aa` scales (e.g. ES-CS20MB1, R-A012, ES-26BB-B) stream
-weight and resistance over GATT notifications with no profile write required:
+Basic-flavor `0x55aa` scales (e.g. ES-CS20MB1, R-A012, ES-26BB-B, R-A016)
+stream weight and resistance over GATT notifications with no profile write
+required:
 
 ```python
 import asyncio
@@ -488,24 +490,21 @@ identifier registry grows.
 
 ### 0x55aa variant (basic flavor, experimental)
 
-- `Renpho55AAScale(address, callback, *, clear_stored_measurements=False,
-  scanning_mode=BluetoothScanningMode.ACTIVE, …)` — client for the `0x55aa`
-  basic-flavor GATT variant (LeFu hardware). It subscribes to notification
-  characteristic `0x2A10` on vendor service `0x1A10`. Differences from
-  `RenphoQNScale`:
-- Operates in notify-only mode by default: no writes are sent to the scale.
+- `Renpho55AAScale(address, callback, display_unit=WeightUnit.KG, *,
+  clear_stored_measurements=False, scanning_mode=BluetoothScanningMode.ACTIVE,
+  …)` — client for the `0x55aa` basic-flavor GATT variant (LeFu hardware). It
+  subscribes to notification characteristic `0x2A10` on vendor service
+  `0x1A10`.
 - `ScaleData.measurements` contains `WEIGHT_KEY` (always kg) plus
   `RESISTANCE_1_KEY` (ohms) when bioimpedance produces a non-zero reading.
 - Body fat is not computed on-device; compute it off-scale with
   `calculate_body_fat()`.
-- `ScaleData.display_unit` reflects the unit reported in device status frames
-  (observed from the scale, currently not settable by the client).
-- App-managed scale modes (such as pregnancy and hold-baby modes) are not
-  supported: measurements taken in those modes are skipped with a warning.
+- `ScaleData.display_unit` reflects the unit the scale reports in its status
+  frames, i.e. what the display actually shows.
 - Stored offline records (`0x15`) sent at connect are logged and discarded by
-  default. Setting `clear_stored_measurements=True` acknowledges each record
-  to drain the scale's offline store (best-effort; left off by default so
-  the official app can collect them).
+  default. Setting `clear_stored_measurements=True` acknowledges them, which
+  clears the scale's entire offline store (verified on the R-A016); it is
+  left off by default so the official app can collect those readings.
 
 ### Broadcast variant (experimental)
 
@@ -690,7 +689,7 @@ scan on
 ## Acknowledgments
 
 - R-MSB01 support contributed by [@Jaano](https://github.com/Jaano) — thank you!
-- `0x55aa` basic flavor support contributed by [@norsoa](https://github.com/norsoa) and [@NicolasLM](https://github.com/NicolasLM) — thank you!
+- `0x55aa` basic flavor support contributed by [@norsoa](https://github.com/norsoa), [@NicolasLM](https://github.com/NicolasLM) and [talormanda](https://github.com/talormanda) — thank you!
 
 ## Support the project
 

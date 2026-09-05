@@ -2,7 +2,7 @@
 
 QN frame (company ID 65535)::
 
-    [0:2]  model identifier, 16-bit big-endian (the app's "InternalModel")
+    [0:2]  model identifier, 16-bit big-endian
     [2:4]  model-dependent constants
     [4]    pending stored-record count (varies with device state)
     [5:11] device MAC address, little-endian
@@ -19,7 +19,7 @@ AABB broadcast frame (company IDs in :data:`AABB_COMPANY_IDS`)::
     [2:4]  model identifier, 16-bit big-endian (0x0003 = the confirmed
            basic-flavor units; extended-flavor units advertise others)
     [4:10] device MAC address, forward byte order
-    [10:]  trailing bytes (firmware/revision)
+    [10:]  trailing bytes
 
 Those two frame families ride the same generic 0xFFFF (65535) company ID — QN
 and AABB are disambiguated by the 0xAABB magic prefix, not by company ID. The
@@ -48,7 +48,7 @@ _LOGGER = logging.getLogger(__name__)
 
 QN_MANUFACTURER_ID = 65535
 
-_QN_MODEL_START = 0  # BE16 at bytes 0:2 (the app's InternalModel)
+_QN_MODEL_START = 0  # BE16 at bytes 0:2
 _QN_MAC_SLICE = slice(5, 11)  # little-endian echo
 _AABB_MAGIC = b"\xaa\xbb"
 _AABB_MAC_SLICE = slice(2, 8)  # FORWARD byte order echo

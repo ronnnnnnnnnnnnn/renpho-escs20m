@@ -57,11 +57,13 @@ _MEASUREMENT_STATUS_UNSTABLE = 0
 _MEASUREMENT_STATUS_STABLE = 1
 _MEASUREMENT_STATUS_STABLE_WITH_METRICS = 2
 
-# Basic-flavor measurement status (byte 5). Two-nibble read: low = weight
-# committed, high = BIA running.
-_BASIC_STATUS_SETTLING = 0x00  # weight not yet committed, no impedance
-_BASIC_STATUS_BIA_RUNNING = 0x11  # weight committed, BIA pass in progress
-_BASIC_STATUS_FINAL = 0x01  # BIA done, impedance present
+# Basic-flavor measurement status (byte 5), in the order the scale sends
+# them on hardware: 0x00 while the weight settles (no impedance), 0x11 once
+# the weight is committed (~2.4 s, still no impedance), 0x01 on the final
+# frame, which carries the impedance.
+_BASIC_STATUS_SETTLING = 0x00
+_BASIC_STATUS_BIA_RUNNING = 0x11
+_BASIC_STATUS_FINAL = 0x01
 
 # Guest-mode sentinels for bytes 3-5 of the user-profile frame. The scale
 # recognizes the session as ephemeral (no slot allocated, nothing stored),
@@ -418,15 +420,14 @@ class _ExtendedStoredFrame(NamedTuple):
 def parse_extended_stored_measurement(payload: bytearray) -> _ExtendedStoredFrame:
     """Decode an extended-flavor stored record.
 
-    The extended flavor inserts a store-user-index byte at offset 5
-    (``0xF0`` = record not assigned to a user slot) and appends the
-    on-device body-fat result, shifting the shared fields by one byte
-    relative to :func:`parse_stored_measurement`::
+    The extended flavor inserts a store-user-index byte at offset 5 and
+    appends the on-device body-fat result, shifting the shared fields by
+    one byte relative to :func:`parse_stored_measurement`::
 
         0..2    prefix 23 <length> <vendor>
         3       count — total records in this batch (0 = store empty)
         4       index — 1-based position of this record in the batch
-        5       store user index (0xF0 = unassigned)
+        5       store user index
         6..9    timestamp, little-endian uint32, seconds since
                 2000-01-01 00:00:00 UTC
         10..11  weight, big-endian uint16, 0.01 kg

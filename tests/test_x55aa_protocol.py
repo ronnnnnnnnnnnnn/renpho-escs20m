@@ -29,6 +29,7 @@ from renpho_escs20m.x55aa.protocol import (
     parse_measurement,
     parse_status,
     parse_stored_record,
+    build_display_unit_command,
 )
 
 ADDRESS = "CF:E8:FC:05:22:0D"
@@ -156,12 +157,53 @@ def test_es26bbb_golden_final():
 
 
 def test_only_the_observed_statuses_classify():
+    """Low nibble = phase (0 settling, 1 final, anything else unclassified);
+    bit 4 = the scale's zero-current (pregnancy) mode, a persisted setting
+    the app writes via 0x90 — R-A016 probe run, 2026-09-03."""
     assert Measurement(60.0, 0, status=0x00).is_settling
     assert Measurement(60.0, 500, status=0x01).is_final
-    for status in (0x02, 0x03, 0x10, 0x11, 0x13):
+    assert Measurement(60.0, 0, status=0x10).is_settling
+    assert Measurement(60.0, 0, status=0x11).is_final
+    for status in (0x00, 0x01):
+        assert not Measurement(60.0, 0, status=status).zero_current
+    for status in (0x10, 0x11, 0x12):
+        assert Measurement(60.0, 0, status=status).zero_current
+    for status in (0x02, 0x05, 0x12):
         measurement = Measurement(weight_kg=60.0, resistance=0, status=status)
         assert not measurement.is_final
         assert not measurement.is_settling
+
+
+def test_ra016_zero_current_capture_frames():
+    """R-A016 official-app capture (integration issue #20): the app had put
+    the scale in zero-current mode, so settling is 0x10 and the final 0x11,
+    both with resistance 0."""
+    (settling,) = _frames(bytes.fromhex("55aa14000710000023b9000006"))
+    m = parse_measurement(settling)
+    assert m == Measurement(weight_kg=91.45, resistance=0, status=0x10)
+    assert m.is_settling and m.zero_current and not m.is_final
+    (final,) = _frames(bytes.fromhex("55aa14000711000023b9000007"))
+    m = parse_measurement(final)
+    assert m == Measurement(weight_kg=91.45, resistance=0, status=0x11)
+    assert m.is_final and m.zero_current
+
+
+def test_ra016_normal_mode_final_from_probe_run():
+    """Same unit after a 0x90 mode-1 write: plain 0x01 final with impedance."""
+    (final,) = _frames(bytes.fromhex("55aa14000701000023b903110b"))
+    m = parse_measurement(final)
+    assert m == Measurement(weight_kg=91.45, resistance=785, status=0x01)
+    assert m.is_final and not m.zero_current
+
+
+def test_build_display_unit_command_is_the_apps_mode_zero_form():
+    """0x90 [unit, 0, 0, 0] — what the app sends every non-R-A016 model, and
+    verified on the R-A016 to change the unit without touching the stored
+    zero-current mode. kg vector = the R-A012 app capture."""
+    assert build_display_unit_command(WeightUnit.KG).hex() == "55aa9000040100000094"
+    assert build_display_unit_command(WeightUnit.LB).hex() == "55aa9000040200000095"
+    assert build_display_unit_command(WeightUnit.ST_LB).hex() == "55aa9000040300000096"
+    assert build_display_unit_command(WeightUnit.ST).hex() == "55aa9000040400000097"
 
 
 def test_parse_measurement_rejects_other_frames():
@@ -190,6 +232,17 @@ def test_stored_records_arrive_oldest_first():
     assert ages == sorted(ages, reverse=True)
 
 
+def test_parse_stored_record_long_form_carries_the_mode_flag():
+    """R-A016 (probe run 2026-09-03): a 14-byte payload whose byte 12 is the
+    zero-current flag of the stored weigh-in; the 12-byte form has none."""
+    (frame,) = _frames(bytes.fromhex("55aa15000e000023b9000000000020000001001f"))
+    record = parse_stored_record(frame)
+    assert (record.weight_kg, record.resistance, record.seconds_ago) == (91.45, 0, 32)
+    assert record.mode_flag == 1
+    (short,) = _frames(MB1_STORED_16_00)
+    assert parse_stored_record(short).mode_flag is None
+
+
 def test_parse_stored_record_rejects_other_frames():
     (frame,) = _frames(MB1_FINAL)
     assert parse_stored_record(frame) is None
@@ -205,7 +258,7 @@ def test_status_decodes_power_unit_count_and_battery():
     assert status.power_on
     assert status.display_unit is WeightUnit.KG
     assert status.stored_count == 7
-    assert status.battery == 0
+    assert status.byte4 == 0
 
 
 def test_status_unit_mapping():

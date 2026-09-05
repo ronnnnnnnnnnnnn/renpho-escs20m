@@ -10,12 +10,29 @@ total frame size is ``6 + length``.
 
 Frame ``0x14`` — measurement (7-byte payload)
     ========  =========================================================
-    ``[0]``   status: ``0x00`` settling, ``0x01`` final.
+    ``[0]``   status. Low nibble: ``0`` settling, ``1`` final; any other
+              value is unclassified. Bit 4 (``0x10``) set: the scale is in its
+              zero-current (pregnancy) mode — a setting the Renpho app
+              stores on the scale, under which the bioimpedance pass is
+              skipped; ``0x10``/``0x11`` are ordinary settling/final
+              frames with resistance 0 (R-A016, capture + probe run).
     ``[1:5]`` weight, uint32 big-endian, 0.01 kg
     ``[5:7]`` resistance, uint16 big-endian, ohms — zero on every
               settling frame, populated on the final after the scale's
               bioimpedance pass.
     ========  =========================================================
+
+Frame ``0x15`` — stored (offline) record (12- or 14-byte payload)
+    ``[0:4]`` weight, ``[4:6]`` resistance, ``[6:10]`` seconds since the
+    weigh-in, ``[10:12]`` reserved; the 14-byte form adds ``[12]`` = the
+    zero-current flag of that weigh-in (R-A016).
+
+Command ``0x90`` — display unit (4-byte payload ``[unit, 0, mode, 0]``)
+    ``unit`` 1=kg 2=lb 3=st:lb 4=st. ``mode`` 0 leaves the scale's stored
+    zero-current setting untouched (verified on the R-A016: the unit
+    changed, the mode stayed) and is what the app itself sends in captured
+    R-A012 sessions; 1/2 would overwrite that setting, so the library
+    never sends them.
 """
 
 from __future__ import annotations
@@ -49,6 +66,7 @@ CMD_STATUS = 0x11
 CMD_STATUS_ALT = 0x12
 CMD_MEASUREMENT = 0x14
 CMD_STORED_RECORD = 0x15
+CMD_SET_DISPLAY_UNIT = 0x90
 
 _LEN_MEASUREMENT = 7
 # Stored-record payloads are 12 bytes on the wire; the first 10 carry the
@@ -66,6 +84,10 @@ _WEIGHT_SCALE = 100.0
 
 STATUS_SETTLING = 0x00
 STATUS_FINAL = 0x01
+STATUS_ZERO_CURRENT = 0x10  # bit 4: zero-current (pregnancy) mode active
+_STATUS_PHASE_MASK = 0x0F
+
+_DISPLAY_UNIT_MODE_KEEP = 0x00
 
 
 _WIRE_UNITS: dict[int, WeightUnit] = {
@@ -74,6 +96,7 @@ _WIRE_UNITS: dict[int, WeightUnit] = {
     3: WeightUnit.ST_LB,
     4: WeightUnit.ST,
 }
+_UNIT_CODES: dict[WeightUnit, int] = {unit: code for code, unit in _WIRE_UNITS.items()}
 
 
 class Frame(NamedTuple):
@@ -92,11 +115,16 @@ class Measurement(NamedTuple):
 
     @property
     def is_final(self) -> bool:
-        return self.status == STATUS_FINAL
+        return (self.status & _STATUS_PHASE_MASK) == STATUS_FINAL
 
     @property
     def is_settling(self) -> bool:
-        return self.status == STATUS_SETTLING
+        return (self.status & _STATUS_PHASE_MASK) == STATUS_SETTLING
+
+    @property
+    def zero_current(self) -> bool:
+        """True when the scale weighed in its zero-current (pregnancy) mode."""
+        return bool(self.status & STATUS_ZERO_CURRENT)
 
 
 class StoredRecord(NamedTuple):
@@ -105,6 +133,7 @@ class StoredRecord(NamedTuple):
     weight_kg: float
     resistance: int
     seconds_ago: int
+    mode_flag: int | None = None  # 14-byte form only: 1 = zero-current weigh-in
 
 
 class DeviceStatus(NamedTuple):
@@ -112,13 +141,26 @@ class DeviceStatus(NamedTuple):
 
     power_on: bool
     display_unit: WeightUnit | None
-    precision: int
+    byte2: int  # unattributed; reads 1 on every unit captured
     stored_count: int
-    battery: int
+    byte4: int  # unattributed; 0 on most units, a constant 1 on the R-A016 — not a battery level
 
 
 def checksum(data: bytes) -> int:
     return sum(data) & 0xFF
+
+
+def _build_frame(cmd: int, payload: bytes) -> bytes:
+    body = _MAGIC + bytes([cmd]) + len(payload).to_bytes(2, "big") + payload
+    return body + bytes([checksum(body)])
+
+
+def build_display_unit_command(unit: WeightUnit) -> bytes:
+    """``0x90 [unit, 0, 0, 0]`` — set the display unit, leave the mode alone."""
+    return _build_frame(
+        CMD_SET_DISPLAY_UNIT,
+        bytes([_UNIT_CODES[WeightUnit(unit)], 0, _DISPLAY_UNIT_MODE_KEEP, 0]),
+    )
 
 
 def is_advertisement(payload: bytes, address: str | None = None) -> bool:
@@ -209,6 +251,7 @@ def parse_stored_record(frame: Frame) -> StoredRecord | None:
         weight_kg=round(int.from_bytes(payload[0:4], "big") / _WEIGHT_SCALE, 2),
         resistance=int.from_bytes(payload[4:6], "big"),
         seconds_ago=int.from_bytes(payload[6:10], "big"),
+        mode_flag=payload[12] if len(payload) > 12 else None,
     )
 
 
@@ -220,7 +263,7 @@ def parse_status(frame: Frame) -> DeviceStatus | None:
     return DeviceStatus(
         power_on=payload[0] == 1,
         display_unit=_WIRE_UNITS.get(payload[1]),
-        precision=payload[2],
+        byte2=payload[2],
         stored_count=payload[3],
-        battery=payload[4],
+        byte4=payload[4],
     )

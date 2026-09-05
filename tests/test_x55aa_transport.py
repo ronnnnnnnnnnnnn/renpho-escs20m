@@ -1,9 +1,10 @@
 """Tests for the 0x55aa GATT transport client (LeFu hardware).
 
-By default the client is notify-only: it subscribes to the vendor
-characteristic, fires the callback on the scale's final measurement frame,
-and never writes — in particular it never acknowledges stored offline
-records, which keeps them available to the official app. The opt-in
+The client subscribes to the vendor characteristic, sends the app's own
+display-unit command once per session (mode byte 0, which leaves the scale's
+stored zero-current setting alone), and fires the callback on the scale's
+final measurement frame. It never acknowledges stored offline records by
+default, which keeps them available to the official app; the opt-in
 ``clear_stored_measurements`` flag acknowledges each stored record instead.
 
 Replay frames are verbatim capture bytes; see test_x55aa_protocol.py
@@ -67,6 +68,16 @@ def _feed(scale: Renpho55AAScale, *frames: bytes) -> None:
         scale._notification_handler(MagicMock(), bytearray(frame), "ES-CS20M", ADDRESS)
 
 
+def _writes(client: MagicMock) -> list[bytes]:
+    return [bytes(c.args[1]) for c in client.write_gatt_char.await_args_list]
+
+
+# 0x90 [unit, 0, 0, 0]: mode byte 0 leaves the scale's stored zero-current
+# setting alone (R-A016 probe run, 2026-09-03).
+UNIT_KG = bytes.fromhex("55aa9000040100000094")
+UNIT_LB = bytes.fromhex("55aa9000040200000095")
+
+
 # ---- session setup ---------------------------------------------------------
 
 
@@ -83,12 +94,42 @@ async def test_session_setup_subscribes_to_the_vendor_notify_characteristic():
 
 
 @pytest.mark.asyncio
-async def test_session_setup_never_writes():
-    """The scale streams on its own; the client is strictly notify-only."""
+async def test_session_setup_writes_only_the_display_unit_command():
+    """One write per session: the app's own display-unit command with mode
+    byte 0, which changes the unit and nothing else."""
     scale, _ = _make_scale()
     client = _make_client()
     await _run_session_setup(scale, client)
+    await asyncio.sleep(0)
+
+    assert _writes(client) == [UNIT_KG]
+    call = client.write_gatt_char.await_args
+    assert call.args[0] is client.chars[X55AA_COMMAND_CHARACTERISTIC_UUID]
+    assert call.kwargs.get("response") is True
+
+
+@pytest.mark.asyncio
+async def test_session_setup_writes_the_configured_display_unit():
+    scale, _ = _make_scale(display_unit=WeightUnit.LB)
+    client = _make_client()
+    await _run_session_setup(scale, client)
+    await asyncio.sleep(0)
+    assert _writes(client) == [UNIT_LB]
+
+
+@pytest.mark.asyncio
+async def test_session_setup_without_command_characteristic_still_reads(caplog):
+    scale, callback = _make_scale()
+    client = _make_client(frozenset({X55AA_NOTIFY_CHARACTERISTIC_UUID}))
+    with caplog.at_level(logging.WARNING):
+        await _run_session_setup(scale, client)
+        await asyncio.sleep(0)
+        _feed(scale, _final(0x01, 7025, 586))
+
     client.write_gatt_char.assert_not_awaited()
+    callback.assert_called_once()
+    warnings = [r for r in caplog.records if "command characteristic" in r.message]
+    assert len(warnings) == 1
 
 
 @pytest.mark.asyncio
@@ -133,8 +174,9 @@ async def test_ra012_capture_replay_fires_once_with_the_final_reading():
     await _run_session_setup(scale, client)
 
     _feed(scale, *[bytes.fromhex(h) for h in RA012_SESSION])
+    await asyncio.sleep(0)
 
-    client.write_gatt_char.assert_not_awaited()
+    assert _writes(client) == [UNIT_KG]
     callback.assert_called_once()
     data = callback.call_args[0][0]
     assert data.measurements == {WEIGHT_KEY: 70.25, RESISTANCE_1_KEY: 586}
@@ -151,8 +193,9 @@ async def test_mb1_capture_replay_reports_the_live_final_not_the_stored_records(
 
     # One callback: the live 61.05 kg final. The stored 16.00/15.10/60.95/
     # 60.90 kg records are logged and discarded, never reported and never
-    # acknowledged.
-    client.write_gatt_char.assert_not_awaited()
+    # acknowledged (the only write is the session's unit command).
+    await asyncio.sleep(0)
+    assert _writes(client) == [UNIT_KG]
     callback.assert_called_once()
     data = callback.call_args[0][0]
     assert data.measurements == {WEIGHT_KEY: 61.05, RESISTANCE_1_KEY: 854}
@@ -172,13 +215,13 @@ async def test_clear_stored_measurements_acks_each_stored_record():
     _feed(scale, *[bytes.fromhex(h) for h in MB1_SESSION])
     await asyncio.sleep(0)
 
-    # Four stored records in the capture -> four acks, each write-with-
-    # response to the command characteristic. The live final still fires
-    # the callback exactly once; the records themselves are never reported.
-    assert client.write_gatt_char.await_count == 4
+    # Four stored records in the capture -> four acks (after the session's
+    # unit command), each write-with-response to the command characteristic.
+    # The live final still fires the callback exactly once; the records
+    # themselves are never reported.
+    assert _writes(client) == [UNIT_KG] + [STORED_RECORD_ACK] * 4
     for call in client.write_gatt_char.await_args_list:
         assert call.args[0] is client.chars[X55AA_COMMAND_CHARACTERISTIC_UUID]
-        assert bytes(call.args[1]) == STORED_RECORD_ACK
         assert call.kwargs.get("response") is True
     callback.assert_called_once()
     assert callback.call_args[0][0].measurements == {
@@ -214,7 +257,7 @@ async def test_clear_stored_measurements_does_not_ack_a_short_stored_record():
     _feed(scale, head + bytes([sum(head) & 0xFF]))
     await asyncio.sleep(0)
 
-    client.write_gatt_char.assert_not_awaited()
+    assert STORED_RECORD_ACK not in _writes(client)
 
 
 @pytest.mark.asyncio
@@ -243,7 +286,7 @@ async def test_clear_stored_measurements_acks_are_written_one_at_a_time():
     release.set()
     await asyncio.gather(*scale._bg_tasks)
 
-    assert client.write_gatt_char.await_count == 4
+    assert client.write_gatt_char.await_count == 5  # unit command + 4 acks
     assert max_in_flight == 1
 
 
@@ -301,8 +344,9 @@ async def test_es26bbb_capture_replay_fires_once_with_the_final_reading():
     await _run_session_setup(scale, client)
 
     _feed(scale, *[bytes.fromhex(h) for h in ES26_SESSION])
+    await asyncio.sleep(0)
 
-    client.write_gatt_char.assert_not_awaited()
+    assert _writes(client) == [UNIT_KG]
     callback.assert_called_once()
     data = callback.call_args[0][0]
     assert data.measurements == {WEIGHT_KEY: 104.60, RESISTANCE_1_KEY: 652}
@@ -373,15 +417,34 @@ async def test_unsupported_statuses_are_skipped_with_one_warning_each(caplog):
     await _run_session_setup(scale, client)
 
     with caplog.at_level(logging.WARNING):
-        _feed(scale, _final(0x11, 7025, 586))
-        _feed(scale, _final(0x11, 7025, 586))  # repeated: no second warning
-        _feed(scale, _final(0x03, 18000, 0))
+        _feed(scale, _final(0x02, 7025, 0))
+        _feed(scale, _final(0x02, 7025, 0))  # repeated: no second warning
+        _feed(scale, _final(0x12, 7025, 0))
 
     callback.assert_not_called()
     warnings = [
         r for r in caplog.records if "unsupported measurement status" in r.message
     ]
     assert len(warnings) == 2
+
+
+@pytest.mark.asyncio
+async def test_zero_current_final_reports_weight_only(caplog):
+    """Zero-current (pregnancy) mode is a setting persisted on the scale by
+    the Renpho app; the BIA pass is skipped and the status carries +0x10.
+    The reading is a real weight and must be delivered — without impedance."""
+    scale, callback = _make_scale()
+    client = _make_client()
+    await _run_session_setup(scale, client)
+
+    with caplog.at_level(logging.INFO):
+        _feed(scale, _final(0x10, 6000, 0), _final(0x11, 7025, 0))
+        _feed(scale, _final(0x11, 7025, 0))  # the hardware repeat
+
+    callback.assert_called_once()
+    assert callback.call_args[0][0].measurements == {WEIGHT_KEY: 70.25}
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert any("zero-current" in r.message for r in caplog.records)
 
 
 @pytest.mark.asyncio
@@ -450,10 +513,29 @@ async def test_display_unit_follows_the_scale_status_frame():
 
 
 @pytest.mark.asyncio
-async def test_display_unit_assignment_is_ignored():
+async def test_display_unit_setter_writes_the_unit_command_while_connected():
+    scale, _ = _make_scale()
+    client = _make_client()
+    await _run_session_setup(scale, client)
+    await asyncio.sleep(0)
+
+    scale.display_unit = WeightUnit.LB
+    await asyncio.sleep(0)
+
+    assert scale.display_unit is WeightUnit.LB
+    assert _writes(client) == [UNIT_KG, UNIT_LB]
+
+
+@pytest.mark.asyncio
+async def test_display_unit_setter_before_a_session_is_applied_at_session_start():
     scale, _ = _make_scale()
     scale.display_unit = WeightUnit.LB
-    assert scale.display_unit is WeightUnit.KG
+    assert scale.display_unit is WeightUnit.LB
+
+    client = _make_client()
+    await _run_session_setup(scale, client)
+    await asyncio.sleep(0)
+    assert _writes(client) == [UNIT_LB]
 
 
 # ---- lifecycle -------------------------------------------------------------

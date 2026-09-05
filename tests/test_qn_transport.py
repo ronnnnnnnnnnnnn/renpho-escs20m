@@ -133,7 +133,9 @@ async def test_session_setup_ffe0_without_ffe2_still_subscribes_ffe1():
 async def test_session_setup_raises_when_no_notify_characteristic():
     scale, _ = _make_scale()
     client = _make_client(frozenset())
-    with pytest.raises(ScaleSessionError, match="notification characteristic not found"):
+    with pytest.raises(
+        ScaleSessionError, match="notification characteristic not found"
+    ):
         await _run_session_setup(scale, client)
     client.start_notify.assert_not_awaited()
 

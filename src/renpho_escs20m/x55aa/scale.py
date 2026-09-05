@@ -1,18 +1,10 @@
 """Renpho ``0x55aa`` variant (LeFu hardware) — GATT connection client.
 
 Basic flavor: the scale streams weight over notify characteristic
-``0x2A10`` on vendor service ``0x1A10`` with no writes required, and
-computes no body composition on-device. The client subscribes and
-listens; body fat is computed off-scale from ``resistance_1`` via
+``0x2A10`` on vendor service ``0x1A10`` and computes no body composition
+on-device. The client subscribes, sends the display-unit command once,
+and listens; body fat is computed off-scale from ``resistance_1`` via
 :func:`renpho_escs20m.calculate_body_fat`.
-
-Coexistence with the official Renpho app: by default the client never
-writes to the scale — in particular it never acknowledges stored offline
-records (``0x15``), which are believed to be deleted by the
-acknowledgement, so any readings taken while the app was away remain
-intact for the app to collect. The opt-in ``clear_stored_measurements``
-flag acknowledges each stored record instead (best-effort; not yet
-verified against real hardware).
 """
 
 from __future__ import annotations
@@ -42,6 +34,7 @@ from .protocol import (
     CMD_STORED_RECORD,
     Frame,
     Measurement,
+    build_display_unit_command,
     iter_frames,
     parse_measurement,
     parse_status,
@@ -49,7 +42,6 @@ from .protocol import (
 )
 
 # Acknowledgement for a stored offline record (``0x95``, payload ``0x01``).
-# Believed to make the scale delete the acknowledged record.
 _STORED_RECORD_ACK = bytes.fromhex("55aa950001" "0196")
 
 
@@ -61,19 +53,21 @@ class Renpho55AAScale(GattScale):
     bioimpedance pass produced one. Weight on the wire is always
     kilograms regardless of the configured display unit.
 
-    ``display_unit`` is observed, not commanded: this protocol's
-    display-unit command is not sent by the library, and the reported
-    unit follows what the scale announces in its status frames.
+    ``display_unit`` is sent to the scale at the start of every session
+    (and immediately when changed while connected) with the mode byte
+    that leaves the scale's stored zero-current setting untouched. The
+    unit the scale announces in its status frames is still tracked and
+    reported, since it reflects what the display actually shows.
+
+    When the scale is in zero-current (pregnancy) mode — a setting the
+    Renpho app stores on it — the bioimpedance pass is skipped and the
+    reading is delivered as weight only.
 
     Stored offline records the scale pushes at connect are logged and
     discarded; they are never delivered via the callback.
 
     ``clear_stored_measurements`` (default ``False``) acknowledges each
-    stored record after it is received. The acknowledgement is believed
-    to make the scale delete the stored reading, which is why the default
-    is off: draining hides those readings from the official Renpho app.
-    This has not yet been verified against real hardware, so the option
-    is best-effort. When off, the client is strictly notify-only.
+    stored record after it is received.
     """
 
     def __init__(
@@ -86,7 +80,11 @@ class Renpho55AAScale(GattScale):
         scanning_mode: BluetoothScanningMode = BluetoothScanningMode.ACTIVE,
         adapter: str | None = None,
         bleak_scanner_backend: BaseBleakScanner | None = None,
-        cooldown_seconds: int = 0,
+        # Same default as the QN client. The scale announces its shutdown
+        # and drops the link ~11 s after the final, then sleeps, so a
+        # re-weigh cannot happen inside this window anyway; the gate only
+        # spares a futile reconnect if a unit keeps advertising briefly.
+        cooldown_seconds: int = 5,
         max_connect_attempts: int = 2,
         logger: logging.Logger | None = None,
     ) -> None:
@@ -110,15 +108,22 @@ class Renpho55AAScale(GattScale):
         self._final_fired = False
         self._final_measurement: Measurement | None = None
         self._warned_statuses: set[int] = set()
+        self._zero_current_logged = False
 
     @GattScale.display_unit.setter
     def display_unit(self, value: WeightUnit) -> None:
-        if value is not None:
-            self._logger.debug(
-                "Ignoring display_unit=%s; the 0x55aa protocol's unit is "
-                "observed from the scale, not set by the library",
-                value,
-            )
+        GattScale.display_unit.fset(self, value)
+        if self._client is not None and self._command_char is not None:
+            self._send_display_unit()
+
+    def _send_display_unit(self) -> None:
+        self._fire_and_forget(
+            self._safe_write(
+                build_display_unit_command(self.display_unit),
+                f"display-unit command ({self.display_unit.value})",
+            ),
+            name="x55aa-display-unit",
+        )
 
     async def _start_scale_session(self, ble_device: BLEDevice) -> None:
         client = self._client
@@ -129,6 +134,7 @@ class Renpho55AAScale(GattScale):
         self._final_fired = False
         self._final_measurement = None
         self._warned_statuses.clear()
+        self._zero_current_logged = False
         self._command_char = None
 
         await self._populate_device_metadata(client)
@@ -139,21 +145,25 @@ class Renpho55AAScale(GattScale):
                 "0x55aa notification characteristic (2A10) not found"
             )
 
-        if self._clear_stored_measurements:
-            self._command_char = client.services.get_characteristic(
-                X55AA_COMMAND_CHARACTERISTIC_UUID
+        self._command_char = client.services.get_characteristic(
+            X55AA_COMMAND_CHARACTERISTIC_UUID
+        )
+        if self._command_char is None:
+            self._logger.warning(
+                "0x55aa command characteristic (2A11) not found on %s; the "
+                "display unit cannot be set%s",
+                ble_device.address,
+                " and stored offline records will not be acknowledged"
+                if self._clear_stored_measurements
+                else "",
             )
-            if self._command_char is None:
-                self._logger.warning(
-                    "0x55aa command characteristic (2A11) not found on %s; "
-                    "stored offline records will not be acknowledged",
-                    ble_device.address,
-                )
 
         def handler(c: BleakGATTCharacteristic, data: bytearray) -> None:
             self._notification_handler(c, data, ble_device.name, ble_device.address)
 
         await client.start_notify(char, handler)
+        if self._command_char is not None:
+            self._send_display_unit()
 
     def _notification_handler(
         self,
@@ -203,9 +213,10 @@ class Renpho55AAScale(GattScale):
             self._final_fired = False
             self._final_measurement = None
             self._logger.debug(
-                "0x55aa settling frame from %s: weight=%.2f kg",
+                "0x55aa settling frame from %s: weight=%.2f kg%s",
                 address,
                 measurement.weight_kg,
+                " (zero-current mode)" if measurement.zero_current else "",
             )
             return
 
@@ -260,7 +271,16 @@ class Renpho55AAScale(GattScale):
         measurements: dict[str, str | float | None] = {
             WEIGHT_KEY: measurement.weight_kg
         }
-        if measurement.resistance:
+        if measurement.zero_current:
+            if not self._zero_current_logged:
+                self._zero_current_logged = True
+                self._logger.info(
+                    "0x55aa scale %s is in zero-current (pregnancy) mode, a "
+                    "setting stored on the scale by the Renpho app; reporting "
+                    "weight only",
+                    address,
+                )
+        elif measurement.resistance:
             measurements[RESISTANCE_1_KEY] = measurement.resistance
 
         self._logger.debug(
@@ -294,19 +314,20 @@ class Renpho55AAScale(GattScale):
         # keeps it available to the official app.
         self._logger.debug(
             "0x55aa stored offline record from %s (discarded): "
-            "weight=%.2f kg, resistance=%d, measured %d seconds ago",
+            "weight=%.2f kg, resistance=%d, measured %d seconds ago%s",
             address,
             record.weight_kg,
             record.resistance,
             record.seconds_ago,
+            f", mode flag={record.mode_flag}" if record.mode_flag is not None else "",
         )
-        if self._command_char is not None:
+        if self._clear_stored_measurements and self._command_char is not None:
             self._fire_and_forget(
-                self._safe_write(_STORED_RECORD_ACK),
+                self._safe_write(_STORED_RECORD_ACK, "stored-record acknowledgement"),
                 name="x55aa-stored-record-ack",
             )
 
-    async def _safe_write(self, data: bytes) -> None:
+    async def _safe_write(self, data: bytes, what: str) -> None:
         """Write ``data`` to the command characteristic; log failures, never raise."""
         async with self._write_lock:
             client = self._client
@@ -320,10 +341,10 @@ class Renpho55AAScale(GattScale):
             try:
                 # The command characteristic supports write-with-response only.
                 await client.write_gatt_char(command_char, data, response=True)
-                self._logger.debug("0x55aa TX payload: %s", data.hex())
+                self._logger.debug("0x55aa TX %s: %s", what, data.hex())
             except Exception:
                 self._logger.exception(
-                    "0x55aa failed to acknowledge stored record (%s)", data.hex()
+                    "0x55aa failed to write %s (%s)", what, data.hex()
                 )
 
     def _handle_status(self, frame: Frame, address: str) -> None:
@@ -338,13 +359,12 @@ class Renpho55AAScale(GattScale):
         if status.display_unit is not None:
             self._display_unit = status.display_unit
         self._logger.debug(
-            "0x55aa status from %s: power_on=%s, unit=%s, stored_count=%d, "
-            "battery=%d",
+            "0x55aa status from %s: power_on=%s, unit=%s, stored_count=%d, " "byte4=%d",
             address,
             status.power_on,
             status.display_unit,
             status.stored_count,
-            status.battery,
+            status.byte4,
         )
 
     def _unavailable_callback(self, client: BleakClient) -> None:
@@ -352,5 +372,6 @@ class Renpho55AAScale(GattScale):
         self._final_fired = False
         self._final_measurement = None
         self._warned_statuses.clear()
+        self._zero_current_logged = False
         self._command_char = None
         super()._unavailable_callback(client)

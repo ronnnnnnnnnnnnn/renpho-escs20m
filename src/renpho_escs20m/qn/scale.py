@@ -385,10 +385,8 @@ class RenphoQNScale(GattScale):
             self._handle_extended_metrics(opcode, payload, address)
         elif opcode == _OP_PROFILE_ACK:
             # Extended-flavor ack of our user-profile command; the only
-            # follow-up is the optional stored-measurement query, which the
-            # extended flavor answers after a *successful* ack (byte 4
-            # 0x01) — a failed ack means no session user, so there is no
-            # store to read.
+            # follow-up is the optional stored-measurement query, sent after
+            # a successful ack (byte 4 0x01).
             self._logger.debug("ES-CS20M user profile acknowledged by %s", address)
             if len(payload) >= 5 and payload[4] == 0x01:
                 self._stored_records_extended = True

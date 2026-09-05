@@ -51,6 +51,7 @@ class ScaleSessionError(Exception):
     ``GattScale._MAX_CONSECUTIVE_SETUP_FAILURES``.
     """
 
+
 _SYSTEM = platform.system()
 _IS_LINUX = _SYSTEM == "Linux"
 _IS_MACOS = _SYSTEM == "Darwin"
