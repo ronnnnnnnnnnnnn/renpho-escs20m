@@ -4,6 +4,7 @@ import logging
 
 from renpho_escs20m import detection as detection_module
 from renpho_escs20m.detection import (
+    X55AA_COMPANY_IDS,
     QN_MANUFACTURER_ID,
     ScaleProtocol,
     detect_protocol,
@@ -142,6 +143,41 @@ def test_unrecognized_identifier_logged_once(caplog):
         )
         detect_protocol("QN-Scale1", {QN: FOREIGN_QN}, "04:AC:44:0B:AA:07")
     assert caplog.text.count("unrecognized model identifier 0x0126 (294)") == 1
+
+
+# R-A016 (talormanda, integration issue #20): company id 0x1A10, model id 3,
+# forward-order MAC echo, trailing bytes 02 01. The manufacturer data rides the
+# primary advertisement; only the name is in the scan response, so passive
+# proxies still classify it.
+RA016_ADV = bytes.fromhex("00040003cfe6092102f40201")
+RA016_ADDR = "CF:E6:09:21:02:F4"
+
+
+def test_ra016_classifies_as_x55aa_from_the_primary_advertisement():
+    x55aa_company = next(iter(X55AA_COMPANY_IDS))
+    assert (
+        detect_protocol("R-A016", {x55aa_company: RA016_ADV}, RA016_ADDR)
+        == ScaleProtocol.X55AA
+    )
+    # passive proxy: no name at all
+    assert (
+        detect_protocol(None, {x55aa_company: RA016_ADV}, RA016_ADDR)
+        == ScaleProtocol.X55AA
+    )
+    # macOS CoreBluetooth UUID address: MAC echo check is skipped
+    assert (
+        detect_protocol(
+            "R-A016", {x55aa_company: RA016_ADV}, "1B2C3D4E-0000-1111-2222-333344445555"
+        )
+        == ScaleProtocol.X55AA
+    )
+    # a different device relaying the same bytes fails the MAC echo
+    assert (
+        detect_protocol("R-A016", {x55aa_company: RA016_ADV}, "AA:BB:CC:DD:EE:FF")
+        is None
+    )
+    # the name alone is not evidence (no name-based fallback for this family)
+    assert detect_protocol("R-A016", {}, RA016_ADDR) is None
 
 
 def test_public_api_exports():
