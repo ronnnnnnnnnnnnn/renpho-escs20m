@@ -172,3 +172,4 @@ src/.DS_Store
 
 # Claude Code project instructions (private)
 /CLAUDE.md
+.claude/*
