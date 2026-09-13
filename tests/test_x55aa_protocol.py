@@ -14,22 +14,45 @@ units' captures:
 
 from __future__ import annotations
 
+import dataclasses
+import datetime
 import logging
 
+import pytest
+
 from renpho_escs20m import ScaleProtocol, detect_protocol, is_x55aa_frame
+from renpho_escs20m.body_metrics import Sex
 from renpho_escs20m.data import WeightUnit
 from renpho_escs20m.x55aa.protocol import (
-    MANUFACTURER_ID,
-    parse_model_id,
-    Frame,
-    Measurement,
+    age_on,
+    assert_allowed_write,
+    build_display_unit_command,
+    build_extended_stored_record_ack,
+    build_guest_profile_command,
+    build_set_time_command,
     checksum,
+    CMD_EXTENDED_STORED_RECORD,
+    ExtendedMeasurement,
+    ExtendedStoredRecord,
+    ForbiddenWrite,
+    Frame,
     is_advertisement,
+    is_extended_model,
     iter_frames,
+    KNOWN_BASIC_MODEL_IDS,
+    KNOWN_EXTENDED_MODEL_IDS,
+    KNOWN_MODEL_IDS,
+    MANUFACTURER_ID,
+    Measurement,
+    parse_extended_measurement,
+    parse_extended_stored_record,
     parse_measurement,
+    parse_model_id,
     parse_status,
     parse_stored_record,
-    build_display_unit_command,
+    SET_TIME_MODEL_IDS,
+    strip_fragment_header,
+    X55AAProfile,
 )
 
 ADDRESS = "CF:E8:FC:05:22:0D"
@@ -316,28 +339,40 @@ def test_detect_protocol_ignores_a_foreign_address():
     assert protocol is None
 
 
-def test_detect_protocol_leaves_unsupported_model_ids_unclassified(caplog):
-    """Extended-flavor units (other model ids) speak frames this client
-    does not parse; classifying them would hold their BLE link without
-    ever producing a reading."""
-    # Real extended-flavor advertisements: model ids 0x0031 and 0x0030.
+def test_detect_protocol_classifies_extended_flavor_model_ids():
+    """Model ids 0x0031 (ESCS20MB2 / Elis 1) and 0x0030 (a sibling revision
+    with identical frames) speak the extended flavor and are supported."""
+    # 00 04 | model id | MAC echo | firmware bytes
     for adv, mac in (
-        ("00040031cfea0201c42e0109", "CF:EA:02:01:C4:2E"),
-        ("00040030cfea011922a40109", "CF:EA:01:19:22:A4"),
+        ("00040031cfea02079367" "0109", "CF:EA:02:07:93:67"),
+        ("00040030cfea011922a4" "0109", "CF:EA:01:19:22:A4"),
     ):
-        with caplog.at_level(logging.WARNING):
-            protocol = detect_protocol(
-                "ES-CS20M", {MANUFACTURER_ID: bytes.fromhex(adv)}, mac
-            )
+        protocol = detect_protocol(
+            "ES-CS20M", {MANUFACTURER_ID: bytes.fromhex(adv)}, mac
+        )
+        assert protocol is ScaleProtocol.X55AA
+
+
+def test_detect_protocol_leaves_unsupported_model_ids_unclassified(caplog):
+    """A 0x55aa-family unit with a model id we have never captured is left
+    unclassified: connecting would hold its BLE link without a reading."""
+    adv = bytes.fromhex("00040034cfea02079367" "0109")  # 0x0034: never captured
+    with caplog.at_level(logging.WARNING):
+        protocol = detect_protocol(
+            "ES-CS20M", {MANUFACTURER_ID: adv}, "CF:EA:02:07:93:67"
+        )
         assert protocol is None
-    assert sum("unsupported model identifier" in r.message for r in caplog.records) == 2
-    assert "0x0031 (49)" in caplog.text
+        protocol = detect_protocol(
+            "ES-CS20M", {MANUFACTURER_ID: adv}, "CF:EA:02:07:93:67"
+        )
+        assert protocol is None
+    assert caplog.text.count("unsupported model identifier 0x0034 (52)") == 1
 
 
 def test_detect_protocol_unsupported_model_id_does_not_fall_through_to_qn():
     """A 0x55aa frame is unambiguous family evidence: a QN-looking name or
     address must not reclassify an unsupported unit as QN."""
-    adv = bytes.fromhex("00040031cfea0201c42e0109")
+    adv = bytes.fromhex("00040035cfea0201c42e0109")
     for name, mac in (
         ("Renpho-Scale", "CF:EA:02:01:C4:2E"),
         ("QN-Scale", "CF:EA:02:01:C4:2E"),
@@ -347,6 +382,337 @@ def test_detect_protocol_unsupported_model_id_does_not_fall_through_to_qn():
         assert detect_protocol(name, {MANUFACTURER_ID: payload}, mac) is None
 
 
+def test_model_id_registry():
+    assert KNOWN_BASIC_MODEL_IDS == {0x0003}
+    assert KNOWN_EXTENDED_MODEL_IDS == {0x0030, 0x0031}
+    assert KNOWN_MODEL_IDS == KNOWN_BASIC_MODEL_IDS | KNOWN_EXTENDED_MODEL_IDS
+    assert SET_TIME_MODEL_IDS == {0x0030, 0x0031}
+    assert is_extended_model(0x0031)
+    assert is_extended_model(0x0030)
+    assert not is_extended_model(0x0003)
+    assert not is_extended_model(None)
+
+
 def test_parse_model_id():
     assert parse_model_id(ADVERTISEMENT) == 0x0003
     assert parse_model_id(b"\x00\x04") is None
+
+
+# ---- extended flavor: 0x18 final --------------------------------------------
+
+EXT_FINAL = bytes.fromhex("55aa18000d01010100001ec301df00ef00ecc3")
+EXT_FINAL_NO_BIA = bytes.fromhex("55aa18000d010102000028aa0000013e000039")
+EXT_FINAL_ZERO_CURRENT = bytes.fromhex("55aa18000d110109000027a60000000000000c")
+
+
+def test_extended_final_decodes_weight_resistance_and_on_device_fields():
+    (frame,) = _frames(EXT_FINAL)
+    m = parse_extended_measurement(frame)
+    assert m == ExtendedMeasurement(
+        weight_kg=78.75, resistance=479, status=0x01, slot=1, bmi=23.9, body_fat=23.6
+    )
+    assert m.is_final and not m.zero_current
+
+
+def test_extended_final_without_impedance_keeps_the_profile_derived_bmi():
+    """Shoes on: the impedance pass yields nothing, but BMI is still computed
+    from the profile height. Callers must not read BMI as evidence of BIA."""
+    (frame,) = _frames(EXT_FINAL_NO_BIA)
+    m = parse_extended_measurement(frame)
+    assert (m.weight_kg, m.resistance, m.bmi, m.body_fat) == (104.10, 0, 31.8, 0.0)
+    assert m.is_final
+
+
+def test_extended_final_in_zero_current_mode():
+    (frame,) = _frames(EXT_FINAL_ZERO_CURRENT)
+    m = parse_extended_measurement(frame)
+    assert m.weight_kg == 101.50 and m.resistance == 0 and m.slot == 9
+    assert m.is_final and m.zero_current
+    assert m.bmi == 0.0
+    assert m.body_fat == 0.0
+
+
+def test_parse_extended_measurement_rejects_other_frames():
+    (frame,) = _frames(ES26_FINAL)
+    assert parse_extended_measurement(frame) is None  # a 0x14
+    short = b"\x55\xaa\x18\x00\x03\x01\x01\x01"
+    (frame,) = _frames(short + bytes([checksum(short)]))
+    assert parse_extended_measurement(frame) is None
+
+
+# ---- extended flavor: 0x19 stored record, fragmented on the wire -----------
+
+# Capture bytes: the 2026-09-06 app-sync session delivered three such records.
+EXT_STORED = bytes.fromhex(
+    "55aa190014" "11020102" "000027a6" "0000" "0000" "0000" "0000" "00000069" "78"
+)
+# 26 bytes exceed the default ATT MTU, so the scale sends each chunk behind
+# a 3-byte header — in that capture, exactly ``AD 00 01`` + 17 bytes and
+# ``AF 00 00`` + 9 bytes.
+EXT_STORED_FRAG_1 = bytes.fromhex("ad0001") + EXT_STORED[:17]
+EXT_STORED_FRAG_2 = bytes.fromhex("af0000") + EXT_STORED[17:]
+EXT_STORED_ACK = bytes.fromhex("55aa990001019a")
+
+
+def test_extended_golden_frames_checksum():
+    for f in (EXT_FINAL, EXT_FINAL_NO_BIA, EXT_FINAL_ZERO_CURRENT, EXT_STORED):
+        assert checksum(f[:-1]) == f[-1]
+
+
+def test_extended_stored_record_decodes():
+    (frame,) = _frames(EXT_STORED)
+    record = parse_extended_stored_record(frame)
+    assert record == ExtendedStoredRecord(
+        weight_kg=101.50, resistance=0, seconds_ago=105, slot=2, status=0x11
+    )
+    assert record.zero_current
+
+
+def test_strip_fragment_header_only_touches_marker_bytes():
+    assert strip_fragment_header(EXT_STORED_FRAG_1) == EXT_STORED[:17]
+    assert strip_fragment_header(EXT_STORED_FRAG_2) == EXT_STORED[17:]
+    assert strip_fragment_header(EXT_FINAL) == EXT_FINAL  # plain frames untouched
+    assert strip_fragment_header(b"\xad\x00") == b"\xad\x00"  # too short to be a header
+
+
+def test_fragmented_stored_record_reassembles_through_iter_frames():
+    buf = bytearray()
+    buf.extend(strip_fragment_header(EXT_STORED_FRAG_1))
+    assert iter_frames(buf) == []  # partial frame withheld
+    buf.extend(strip_fragment_header(EXT_STORED_FRAG_2))
+    frames = iter_frames(buf)
+    assert len(frames) == 1 and frames[0].cmd == CMD_EXTENDED_STORED_RECORD
+    assert parse_extended_stored_record(frames[0]).seconds_ago == 105
+
+
+def test_parse_extended_stored_record_rejects_other_frames():
+    (final,) = _frames(EXT_FINAL)
+    assert parse_extended_stored_record(final) is None
+    (basic_record,) = _frames(MB1_STORED_16_00)  # a basic-flavor 0x15
+    assert parse_extended_stored_record(basic_record) is None
+    short_payload = EXT_STORED[5:24]  # 19 bytes: one short of the exact length
+    short_body = b"\x55\xaa\x19\x00\x13" + short_payload
+    (short,) = _frames(short_body + bytes([checksum(short_body)]))
+    assert parse_extended_stored_record(short) is None
+    long_payload = EXT_STORED[5:25] + b"\x00"  # 21 bytes: one over the exact length
+    long_body = b"\x55\xaa\x19\x00\x15" + long_payload
+    (long_frame,) = _frames(long_body + bytes([checksum(long_body)]))
+    assert parse_extended_stored_record(long_frame) is None
+
+
+def test_build_extended_stored_record_ack():
+    assert build_extended_stored_record_ack() == EXT_STORED_ACK
+
+
+# ---- extended flavor: guest profile (0x96) ---------------------------------
+
+GUEST_PROFILE_L0G1C5 = bytes.fromhex("55aa96000e1907c6010106a400002288a9ff058c")
+GUEST_PROFILE_SURUBUTNA = bytes.fromhex("55aa96000e1907cb090106d600001b35aaff0572")
+
+
+def test_guest_profile_reproduces_the_apps_frame_byte_for_byte():
+    """From a capture of the official app: male, 1 Jan 1990, 170.0 cm,
+    last weight 88.40 kg, algorithm 0x03."""
+    profile = X55AAProfile(
+        sex=Sex.Male,
+        birthday=datetime.date(1990, 1, 1),
+        height_m=1.70,
+        last_weight_kg=88.40,
+    )
+    assert (
+        build_guest_profile_command(profile, fallback_last_weight_kg=70.0)
+        == GUEST_PROFILE_L0G1C5
+    )
+
+
+def test_guest_profile_falls_back_when_the_profile_has_no_last_weight():
+    profile = X55AAProfile(
+        sex=Sex.Male, birthday=datetime.date(1990, 1, 1), height_m=1.70
+    )
+    assert (
+        build_guest_profile_command(profile, fallback_last_weight_kg=88.40)
+        == GUEST_PROFILE_L0G1C5
+    )
+
+
+def test_guest_profile_algorithm_0x04_selects_the_other_on_device_method():
+    """A second captured profile: same layout, low flag bits 2 → algorithm 0x04."""
+    profile = X55AAProfile(
+        sex=Sex.Male,
+        birthday=datetime.date(1995, 9, 1),
+        height_m=1.75,
+        algorithm=0x04,
+        last_weight_kg=69.65,
+    )
+    assert (
+        build_guest_profile_command(profile, fallback_last_weight_kg=0.0)
+        == GUEST_PROFILE_SURUBUTNA
+    )
+
+
+def test_guest_profile_field_encoding():
+    profile = X55AAProfile(
+        sex=Sex.Female,
+        birthday=datetime.date(1988, 12, 6),
+        height_m=1.57,
+        athlete=True,
+        last_weight_kg=84.40,
+    )
+    frame = build_guest_profile_command(profile, fallback_last_weight_kg=70.0)
+    p = frame[5:-1]
+    assert len(p) == 14
+    assert p[0] == 0x29  # female = 2 in bits 5:4, guest slot 9 in the low nibble
+    assert p[1:5] == bytes.fromhex("07c4" "0c" "06")  # 1988-12-06
+    assert int.from_bytes(p[5:7], "big") == 1570  # 0.1 cm units
+    assert int.from_bytes(p[7:11], "big") == 8440  # 0.01 kg units
+    assert p[11] >> 6 == 1  # athlete flag
+    assert p[11] & 0x03 == 1  # algorithm 0x03 → method 1
+    assert p[12] == 0xFF  # the guest form's value
+    assert p[13] == 0x05
+    assert checksum(frame[:-1]) == frame[-1]
+
+
+def test_age_on_rejects_a_birthday_in_the_future():
+    with pytest.raises(ValueError):
+        age_on(datetime.date(2030, 1, 1), datetime.date(2026, 9, 13))
+
+
+def test_guest_profile_can_ask_the_scale_to_skip_the_impedance_pass():
+    """One byte differs; the scale then returns no resistance and shows weight
+    only on its own display."""
+    profile = X55AAProfile(
+        sex=Sex.Male, birthday=datetime.date(1990, 1, 1), height_m=1.70
+    )
+    on = build_guest_profile_command(profile, 88.40)
+    off = build_guest_profile_command(profile, 88.40, measure_impedance=False)
+    assert on == GUEST_PROFILE_L0G1C5
+    assert off[:-2] == on[:-2]
+    assert on[-2] == 0x05 and off[-2] == 0x06
+    assert checksum(off[:-1]) == off[-1]
+
+
+def test_guest_profile_rejects_unknown_algorithm_and_bad_height():
+    good = X55AAProfile(sex=Sex.Male, birthday=datetime.date(1990, 1, 1), height_m=1.70)
+    with pytest.raises(ValueError):
+        build_guest_profile_command(dataclasses.replace(good, algorithm=0x00), 70.0)
+    with pytest.raises(ValueError):
+        build_guest_profile_command(dataclasses.replace(good, height_m=0.0), 70.0)
+    with pytest.raises(ValueError):
+        build_guest_profile_command(
+            dataclasses.replace(good, last_weight_kg=-1.0), 70.0
+        )
+    with pytest.raises(ValueError):
+        build_guest_profile_command(good, fallback_last_weight_kg=-1.0)
+
+
+def test_age_on_is_birthday_aware():
+    b = datetime.date(1990, 6, 15)
+    assert age_on(b, datetime.date(2026, 6, 14)) == 35
+    assert age_on(b, datetime.date(2026, 6, 15)) == 36
+    assert age_on(b, datetime.date(2026, 12, 31)) == 36
+    leap = datetime.date(2000, 2, 29)
+    assert age_on(leap, datetime.date(2026, 2, 28)) == 25
+    assert (
+        age_on(leap, datetime.date(2026, 3, 1)) == 26
+    )  # birthday rolls to Mar 1 in common years
+
+
+# ---- set-time (0x97 sub-op 1) and the write allow-list ---------------------
+
+SET_TIME_L0G1C5 = bytes.fromhex("55aa9700090100006a8084dd0002ed")
+
+
+def test_set_time_reproduces_the_apps_frame():
+    """From a capture: 2026-08-15T15:25:17Z from a phone in UTC+2."""
+    assert (
+        build_set_time_command(0x6A8084DD, utc_offset_seconds=7200) == SET_TIME_L0G1C5
+    )
+    assert build_set_time_command(0x6A8084DD, 7200)[5:-1] == bytes.fromhex(
+        "01" "00006a8084dd" "00" "02"
+    )
+
+
+def test_set_time_encodes_negative_and_fractional_offsets():
+    p = build_set_time_command(0x6A8084DD, utc_offset_seconds=-5 * 3600)[5:-1]
+    assert p[7:9] == bytes([1, 5])
+    p = build_set_time_command(0x6A8084DD, utc_offset_seconds=5 * 3600 + 1800)[5:-1]
+    assert p[7:9] == bytes([0, 5])  # whole hours, like the app
+
+
+def test_set_time_rejects_out_of_range():
+    with pytest.raises(ValueError):
+        build_set_time_command(-1, 0)
+    with pytest.raises(ValueError):
+        build_set_time_command(1 << 48, 0)
+    with pytest.raises(ValueError):
+        build_set_time_command(0x6A8084DD, 7200 * 1000)  # a milliseconds mistake
+    assert (
+        build_set_time_command(1786807517.9, 7200) == SET_TIME_L0G1C5
+    )  # float coercion
+
+
+def test_write_allow_list_accepts_what_the_library_sends():
+    for frame in (
+        build_display_unit_command(WeightUnit.KG),
+        build_guest_profile_command(
+            X55AAProfile(Sex.Male, datetime.date(1990, 1, 1), 1.70), 70.0
+        ),
+        build_set_time_command(0x6A8084DD, 7200),
+        build_extended_stored_record_ack(),
+        bytes.fromhex("55aa950001" "0196"),
+    ):
+        assert_allowed_write(frame)  # no exception
+
+
+def test_write_allow_list_refuses_destructive_frames():
+    # 0x90 with a mode byte: 1/2 overwrite the scale's persisted zero-current
+    # setting, and mode 2 has no known exit on the extended flavor.
+    for mode in (1, 2, 3):
+        head = bytes([0x55, 0xAA, 0x90, 0x00, 0x04, 0x01, 0x00, mode, 0x00])
+        with pytest.raises(ValueError):
+            assert_allowed_write(head + bytes([checksum(head)]))
+    mode2 = bytes([0x55, 0xAA, 0x90, 0x00, 0x04, 0x01, 0x00, 2, 0x00])
+    with pytest.raises(ForbiddenWrite):
+        assert_allowed_write(mode2 + bytes([checksum(mode2)]))
+    # 0x97 in any form other than the 9-byte set-time payload.
+    head = bytes.fromhex("55aa970002" "1001")
+    with pytest.raises(ValueError):
+        assert_allowed_write(head + bytes([checksum(head)]))
+    # 0x96 addressing a registered slot.
+    registered = bytearray(GUEST_PROFILE_L0G1C5)
+    registered[5] = 0x11  # slot 1
+    registered[-1] = checksum(registered[:-1])
+    with pytest.raises(ValueError):
+        assert_allowed_write(bytes(registered))
+    # A guest profile whose trailer byte is neither form we send.
+    odd_trailer = bytearray(GUEST_PROFILE_L0G1C5)
+    odd_trailer[18] = 0x09
+    odd_trailer[-1] = checksum(odd_trailer[:-1])
+    with pytest.raises(ValueError):
+        assert_allowed_write(bytes(odd_trailer))
+    # An ack opcode carrying some other payload.
+    head = bytes.fromhex("55aa990001" "02")
+    with pytest.raises(ValueError):
+        assert_allowed_write(head + bytes([checksum(head)]))
+    # Anything not on the list.
+    head = bytes.fromhex("55aa910001" "01")
+    with pytest.raises(ValueError):
+        assert_allowed_write(head + bytes([checksum(head)]))
+    # Not a frame at all.
+    with pytest.raises(ValueError):
+        assert_allowed_write(b"\x01\x02\x03")
+    # Deciding-condition cases.
+    with pytest.raises(ValueError):  # right length, wrong magic
+        assert_allowed_write(b"\x01\x02\x03\x04\x05\x06")
+    head = bytes.fromhex("55aa900005" "0100000000")
+    with pytest.raises(ValueError):  # 0x90 with a 5-byte payload, mode byte 0
+        assert_allowed_write(head + bytes([checksum(head)]))
+    guest_wrong_mask = bytearray(GUEST_PROFILE_L0G1C5)
+    guest_wrong_mask[17] = 0x01  # payload[12]: not the guest form's 0xFF
+    guest_wrong_mask[-1] = checksum(guest_wrong_mask[:-1])
+    with pytest.raises(ValueError):
+        assert_allowed_write(bytes(guest_wrong_mask))
+    settings_head = bytes.fromhex("55aa970002" "1001")
+    settings_frame = settings_head + bytes([checksum(settings_head)])
+    with pytest.raises(ValueError):  # an allowed frame with a forbidden one appended
+        assert_allowed_write(build_extended_stored_record_ack() + settings_frame)

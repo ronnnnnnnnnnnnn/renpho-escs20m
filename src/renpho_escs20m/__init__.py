@@ -1,7 +1,13 @@
 """Renpho BLE scale client."""
 
 from ._version import __version__, __version_info__
-from .x55aa import Renpho55AAScale
+from .x55aa import (
+    Renpho55AAScale,
+    X55AAProfile,
+    X55AAProfileResolver,
+    age_on,
+    build_guest_profile_command,
+)
 from .xaabb import RenphoAABBScale
 from .const import (
     BMI_KEY,
@@ -61,6 +67,10 @@ __all__ = [
     "RenphoESCS20MScale",
     "RenphoAABBScale",
     "Renpho55AAScale",
+    "X55AAProfile",
+    "X55AAProfileResolver",
+    "age_on",
+    "build_guest_profile_command",
     "Profile",
     "ProfileResolver",
     "BluetoothScanningMode",

@@ -16,8 +16,9 @@ AABB broadcast frame (company IDs in :data:`AABB_COMPANY_IDS`)::
 0x55aa frame (company IDs in :data:`X55AA_COMPANY_IDS`)::
 
     [0:2]  fixed 00 04 prefix
-    [2:4]  model identifier, 16-bit big-endian (0x0003 = the confirmed
-           basic-flavor units; extended-flavor units advertise others)
+    [2:4]  model identifier, 16-bit big-endian (0x0003 = basic flavor;
+           0x0030/0x0031 = extended flavor; anything else is left
+           unclassified)
     [4:10] device MAC address, forward byte order
     [10:]  trailing bytes
 
@@ -38,7 +39,7 @@ import fnmatch
 import logging
 from enum import StrEnum
 
-from .x55aa.protocol import KNOWN_BASIC_MODEL_IDS as X55AA_KNOWN_MODEL_IDS
+from .x55aa.protocol import KNOWN_MODEL_IDS as X55AA_KNOWN_MODEL_IDS
 from .x55aa.protocol import SUPPORTED_COMPANY_IDS as X55AA_COMPANY_IDS
 from .x55aa.protocol import is_advertisement as _is_x55aa_advertisement
 from .x55aa.protocol import parse_model_id as _parse_x55aa_model_id
@@ -237,12 +238,11 @@ def detect_protocol(
             model_id = _parse_x55aa_model_id(payload)
             if model_id in X55AA_KNOWN_MODEL_IDS:
                 return ScaleProtocol.X55AA
-            # A 0x55aa-family unit whose model id isn't supported yet
-            # (e.g. the extended flavor). Deliberately unclassified:
-            # connecting would hold the scale's BLE link away from the
-            # official app without producing readings. The frame is
-            # conclusive family evidence, so the name/address fallbacks
-            # below must not reclassify it as QN.
+            # A 0x55aa-family unit whose model id has never been captured.
+            # Deliberately unclassified: connecting would hold the scale's
+            # BLE link away from the official app without producing
+            # readings. The frame is conclusive family evidence, so the
+            # name/address fallbacks below must not reclassify it as QN.
             if (
                 model_id is not None
                 and (company, model_id) not in _reported_identifiers

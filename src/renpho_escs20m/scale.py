@@ -18,7 +18,7 @@ import asyncio
 import logging
 import platform
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable, Coroutine
 from typing import Any
 
 from bleak import BleakClient
@@ -182,10 +182,20 @@ class RenphoScale(abc.ABC):
             self._scanner.register_detection_callback(self._advertisement_callback)
         self._lock = asyncio.Lock()
 
-    def _fire_and_forget(self, coro: Awaitable[Any], name: str) -> None:
+    def _spawn(self, coro: Coroutine[Any, Any, Any], name: str) -> asyncio.Task:
+        """Run ``coro`` as a tracked background task and return it.
+
+        The reference is held until the task finishes, so it cannot be
+        garbage-collected mid-flight; callers that need to cancel or await
+        the task keep the returned handle themselves.
+        """
         task = asyncio.create_task(coro, name=name)
         self._bg_tasks.add(task)
         task.add_done_callback(self._bg_tasks.discard)
+        return task
+
+    def _fire_and_forget(self, coro: Coroutine[Any, Any, Any], name: str) -> None:
+        self._spawn(coro, name)
 
     @property
     def display_unit(self) -> WeightUnit:

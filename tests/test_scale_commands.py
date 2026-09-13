@@ -345,9 +345,9 @@ def test_user_profile_command_height_m_preserves_user_precision(
 def test_user_profile_command_matches_observed_guest_capture():
     """Match the exact bytes captured from a real Renpho-app guest session.
 
-    Source: full BLE capture of a Tourist-Mode measurement, profile:
+    Source: full BLE capture of a guest-mode measurement, profile:
     male, 43yo, 170cm, non-athlete, algorithm 0x03 (Kyle/Segal-family
-    BIA — what Renpho's app sends to non-NA users).
+    BIA — the algorithm this and most other captures carry).
     """
     cmd = build_user_profile_command(
         sex=0, age=43, height_m=1.70, athlete=False, algorithm=0x03

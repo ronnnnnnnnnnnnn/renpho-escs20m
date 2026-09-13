@@ -163,13 +163,10 @@ cython_debug/
 src/.DS_Store
 .DS_Store
 
-# Personal hardware-test script (carries a real scale's MAC address)
 /test-escs20m.py
 
-# Private reverse-engineering reference (not part of the public release)
 /ALGORITHMS.md
 /PROTOCOL.md
 
-# Claude Code project instructions (private)
 /CLAUDE.md
-.claude/*
+.claude/
