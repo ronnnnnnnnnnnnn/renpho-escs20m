@@ -8,7 +8,7 @@
 This package provides an unofficial interface for interacting with
 Renpho's ES-CS20M scale (and other scales that share the same
 QN-series protocol, including some non-Renpho ones) over Bluetooth Low
-Energy. It also has experimental support for basic-flavor `0x55aa` GATT
+Energy. It also has experimental support for `0x55aa` GATT
 scales and experimental weight-only support for a broadcast-only
 (`0xaabb`) subvariant. See the
 [Device compatibility](#device-compatibility) section for the current
@@ -65,6 +65,7 @@ depends on which one its hardware uses:
 |------------|-----------|-----------------|----------|
 | QN-series  | GATT      | ✅ Supported     | Weight, impedance, body-composition metrics, display-unit control |
 | `0x55aa` (basic) | GATT | 🔬 Experimental | Weight and impedance, display-unit control |
+| `0x55aa` (extended) | GATT | 🔬 Experimental | Weight and impedance, display-unit control; guest profile sent to the scale |
 | `0xaabb`   | Broadcast | 🔬 Experimental  | Weight only (display unit observed, not settable) |
 
 ### Identifying your scale
@@ -115,6 +116,7 @@ Experimental:
 | ES-26BB-B      | `ES26BBB`   | ?                 | `0x55aa` (basic)       |
 | R-A012         | —           | `2A26P-RA012N`    | `0x55aa` (basic)       |
 | R-A016         | —           | `2A26P-RA016`     | `0x55aa` (basic)       |
+| ES-CS20M       | `ESCS20MB2` | `2A26P-ESCS20MB2` | `0x55aa` (extended)    |
 
 - **Arboleaf CS20M** — QN-series hardware ships the same wire protocol
   on two GATT service layouts, and the library handles both: the FFF0
@@ -130,19 +132,18 @@ Experimental:
 - **`0x55aa` basic flavor (ES-CS20MB1, ES-26BB-B, R-A012, R-A016)** — scales
   that stream weight and bioimpedance over GATT notify characteristic
   `0x2A10` on vendor service `0x1A10`. Supported via `Renpho55AAScale`.
-  
+- **`0x55aa` extended flavor (ES-CS20M `ESCS20MB2`)** — the scale
+  computes body composition on-device from a profile sent over BLE, and
+  will not release a final at all without one. The library sends a guest
+  profile (no user is ever registered on the scale), reports weight and
+  impedance, and leaves the on-device BMI/body-fat unreported: they reflect
+  whatever profile the scale held when the measurement committed, which a
+  profile written mid-weigh-in cannot guarantee. Compute body composition
+  off-scale exactly as for the basic flavor. The client picks this flavor
+  up from the scale's advertisement; `model_id` (`0x0031` / `0x0030`) only
+  needs passing to override that.
 
-Known-incompatible — `0x55aa` extended flavor (not yet supported):
-
-| Marketed model | HVIN        | FCC ID            | Protocol (first payload bytes) |
-|----------------|-------------|-------------------|--------------------------------|
-| ES-CS20M       | `ESCS20MB2` | `2A26P-ESCS20MB2` | `0x55aa` (extended flavor)     |
-
-The **Protocol** column records the first bytes of the notification frames
-each unsupported variant emits — a rough fingerprint of the (different) BLE
-protocol it speaks, kept for reference and possible future support work.
-
-The pattern so far: marketed model name is unreliable, but the HVIN — and specifically its revision suffix (`A2`, `B1`, `B2`, `N`…) — tracks the actual hardware and apparently also the protocol. If your Renpho scale HVIN ends in `A2`, `B1`, or `N`, this library will likely work with it; if it ends in some other suffix, try it out to see if it works and report back on the issue tracker.
+The pattern so far: marketed model name is unreliable, but the HVIN — and specifically its revision suffix (`A2`, `B1`, `B2`, `N`…) — tracks the actual hardware and apparently also the protocol. If your Renpho scale HVIN ends in `A2`, `B1`, `B2`, or `N`, this library will likely work with it; if it ends in some other suffix, try it out to see if it works and report back on the issue tracker.
 
 > This library may also work with other QN-Scale varieties utilizing the same protocol (on either GATT layout), including non-Renpho ones. Feel free to report compatibility results on the issue tracker.
 
@@ -302,7 +303,7 @@ the bootstrap profile (no body fat) before your resolved profile
 lands. If the BLE session ends while the resolver is still in flight,
 the library cancels the resolver task to avoid leaking work.
 
-### 0x55aa variant (basic flavor)
+### 0x55aa variant
 
 Basic-flavor `0x55aa` scales (e.g. ES-CS20MB1, R-A012, ES-26BB-B, R-A016)
 stream weight and resistance over GATT notifications with no profile write
@@ -336,6 +337,49 @@ async def main():
 
 asyncio.run(main())
 ```
+
+Extended-flavor units (`ESCS20MB2`, model ids `0x0031`/`0x0030`) additionally
+take a profile. The flavor is learned from the scale's advertisement, so
+`model_id` is optional. Pass either a fixed profile (single user), an async
+resolver called once per weigh-in with the settled weight (several users), or
+nothing (weight only):
+
+```python
+import datetime
+from renpho_escs20m import Renpho55AAScale, Sex, X55AAProfile
+
+profile = X55AAProfile(
+    sex=Sex.Female,
+    birthday=datetime.date(1988, 12, 6),
+    height_m=1.57,
+    athlete=False,
+    algorithm=0x03,  # or 0x04; same ids as calculate_body_fat
+    last_weight_kg=84.4,  # optional: the user's previous reading, as the app sends
+)
+
+
+async def resolve(weight_kg: float) -> X55AAProfile | None:
+    return profile if 80 < weight_kg < 90 else None  # None → placeholder profile
+
+
+scale = Renpho55AAScale(
+    'XX:XX:XX:XX:XX:XX',
+    notification_callback,
+    model_id=0x0031,  # optional: learned from the advertisement when omitted
+    profile=resolve,
+)
+```
+
+Notes: the profile is written in the scale's guest channel, so no user is
+created on the scale and the official app is unaffected. The client also sets
+the scale's clock at connect (the scale derives age from the birth date and
+its clock for the numbers on its own display). If a resolver returns `None`,
+raises, or takes longer than 2 s, a placeholder profile is sent so the
+reading is not lost; the callback then carries weight and impedance as usual.
+On the scale's own display, body-fat numbers are only meaningful when the
+profile reached the scale before you stepped on — fixed-profile mode, or a
+fast resolver. If the scale powers off without sending a final after the
+weight settled, the settled weight is reported without impedance.
 
 ### Broadcast variant
 
@@ -395,7 +439,8 @@ Frame layouts (manufacturer-data value, company ID already stripped):
   model-dependent constants; `[4]` pending stored-record count, which varies
   with device state; `[5:11]` device MAC address, little-endian.
 - 0x55aa (company ID `0x1A10`): `[0:2]` fixed `00 04` prefix; `[2:4]` model
-  identifier, 16-bit big-endian (`0x0003` = basic flavor); `[4:10]` device MAC
+  identifier, 16-bit big-endian (`0x0003` = basic flavor, `0x0030`/`0x0031` =
+  extended flavor — `Renpho55AAScale` reads it from here itself); `[4:10]` device MAC
   address, forward byte order; `[10:]` trailing bytes.
 - AABB (company ID 65535): `[0:2]` `0xAABB` magic; `[2:8]` device MAC address,
   forward byte order; `[8:]` protocol payload.
@@ -488,23 +533,49 @@ identifier registry grows.
   the `scanning_mode` kwarg. `PASSIVE` only takes effect on Linux
   (BlueZ); other platforms fall back to active.
 
-### 0x55aa variant (basic flavor, experimental)
+### 0x55aa variant (experimental)
 
 - `Renpho55AAScale(address, callback, display_unit=WeightUnit.KG, *,
-  clear_stored_measurements=False, scanning_mode=BluetoothScanningMode.ACTIVE,
-  …)` — client for the `0x55aa` basic-flavor GATT variant (LeFu hardware). It
-  subscribes to notification characteristic `0x2A10` on vendor service
-  `0x1A10`.
+  model_id=None, profile=None, clear_stored_measurements=False,
+  scanning_mode=BluetoothScanningMode.ACTIVE, …)` — client for the `0x55aa`
+  GATT variant (LeFu hardware). It subscribes to notification characteristic
+  `0x2A10` on vendor service `0x1A10`.
+- `model_id` is the identifier the scale advertises, and selects the flavor:
+  `0x0030`/`0x0031` are the extended flavor, anything else the basic one. It is
+  optional — learned from the advertisement when omitted; pass it to override.
+- `profile` applies to the extended flavor only, where the scale releases no
+  final without a profile on it. It takes an `X55AAProfile`, an async resolver
+  called once per weigh-in with the settled weight, or `None`. The library
+  always writes it in the scale's guest channel, so no user is registered on
+  the scale. With `None` it writes a placeholder that asks the scale to skip
+  its bioimpedance pass, so the reading and the scale's own display are both
+  weight alone — unlike the QN client, whose weight-only mode still reports
+  impedance. To get impedance without body composition, pass a profile: the
+  scale's own numbers are discarded in every mode anyway.
+- `age_on(birthday, today)` — whole years from `birthday` to `today`,
+  birthday-aware, for feeding `calculate_body_fat()` from an `X55AAProfile`
+  (which carries a date of birth rather than an age).
 - `ScaleData.measurements` contains `WEIGHT_KEY` (always kg) plus
   `RESISTANCE_1_KEY` (ohms) when bioimpedance produces a non-zero reading.
-- Body fat is not computed on-device; compute it off-scale with
-  `calculate_body_fat()`.
+- Body fat: the basic flavor computes nothing on-device; the extended flavor
+  does, but from whatever profile the scale held when the measurement
+  committed, so those numbers are deliberately not reported. Compute it
+  off-scale from `resistance_1` with `calculate_body_fat()` on both flavors.
 - `ScaleData.display_unit` reflects the unit the scale reports in its status
   frames, i.e. what the display actually shows.
-- Stored offline records (`0x15`) sent at connect are logged and discarded by
-  default. Setting `clear_stored_measurements=True` acknowledges them, which
-  clears the scale's entire offline store (verified on the R-A016); it is
-  left off by default so the official app can collect those readings.
+- When the scale is in zero-current (pregnancy) mode — a setting the official
+  app stores on the scale — the bioimpedance pass is skipped and the reading
+  is delivered as weight only. On the extended flavor, a scale that powers off
+  without ever releasing a final still reports the settled weight, alone, a
+  second later; a final arriving inside that second wins.
+- Stored offline records (basic `0x15`, extended `0x19`) are logged and
+  discarded, never reported as live readings. `clear_stored_measurements=True`
+  acknowledges each one (basic `0x95`, extended `0x99`); on the R-A016 a single
+  acknowledgement cleared the whole store, and on the extended flavor the
+  delete scope is unverified. Extended records are released per user slot only
+  to a session presenting that slot's profile, so a guest session has not been
+  observed to receive any. It is left off by default so the official app can
+  collect those readings.
 
 ### Broadcast variant (experimental)
 
@@ -689,7 +760,8 @@ scan on
 ## Acknowledgments
 
 - R-MSB01 support contributed by [@Jaano](https://github.com/Jaano) — thank you!
-- `0x55aa` basic flavor support contributed by [@norsoa](https://github.com/norsoa), [@NicolasLM](https://github.com/NicolasLM) and [talormanda](https://github.com/talormanda) — thank you!
+- `0x55aa` basic flavor support contributed by [@norsoa](https://github.com/norsoa), [@NicolasLM](https://github.com/NicolasLM) and [@talormanda](https://github.com/talormanda) — thank you!
+- `0x55aa` extended flavor support contributed by [@miketenwolde](https://github.com/miketenwolde), [@surubutna](https://github.com/surubutna), [@l0g1c5](https://github.com/l0g1c5) and [@Venomeus](https://github.com/Venomeus) — thank you!
 
 ## Support the project
 
