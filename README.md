@@ -376,10 +376,15 @@ the scale's clock at connect (the scale derives age from the birth date and
 its clock for the numbers on its own display). If a resolver returns `None`,
 raises, or takes longer than 2 s, a placeholder profile is sent so the
 reading is not lost; the callback then carries weight and impedance as usual.
-On the scale's own display, body-fat numbers are only meaningful when the
-profile reached the scale before you stepped on — fixed-profile mode, or a
-fast resolver. If the scale powers off without sending a final after the
-weight settled, the settled weight is reported without impedance.
+On the scale's own display, BMI and body fat are only reliable in
+fixed-profile mode, where the profile is on the scale before you step on. In
+resolver mode the profile is written once the weight settles, which may be
+after the scale has already computed its numbers, so the display may show
+values for the profile it held before (an earlier resolver answer, or the
+placeholder), or none at all. The callback is unaffected either way: the
+library never reports the scale's own numbers. If the scale powers off
+without sending a final after the weight settled, the settled weight is
+reported without impedance.
 
 ### Broadcast variant
 
