@@ -32,7 +32,13 @@ from .data import BluetoothScanningMode, ScaleData, WeightUnit
 from .qn import RenphoQNScale
 from .body_metrics import BodyMetrics, Sex, calculate_body_fat
 from .qn.protocol import Profile, ProfileResolver, build_user_profile_command
-from .scale import AdvertisementScale, GattScale, RenphoScale, ScaleSessionError
+from .scale import (
+    AdvertisementScale,
+    GattScale,
+    RenphoScale,
+    ScaleSessionError,
+    mask_mac_echo,
+)
 from .detection import (
     KNOWN_QN_SCALE_IDENTIFIERS,
     QN_MANUFACTURER_ID,
@@ -41,6 +47,7 @@ from .detection import (
     is_aabb_frame,
     is_qn_frame,
     is_x55aa_frame,
+    model_label,
     parse_qn_model_code,
 )
 
@@ -98,6 +105,8 @@ __all__ = [
     "BODY_SCORE_KEY",
     "BODY_SHAPE_KEY",
     "KNOWN_QN_SCALE_IDENTIFIERS",
+    "model_label",
+    "mask_mac_echo",
     "QN_MANUFACTURER_ID",
     "SCALE_CLASSES",
     "ScaleProtocol",

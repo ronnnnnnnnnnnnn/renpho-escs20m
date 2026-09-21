@@ -18,7 +18,8 @@ import asyncio
 import logging
 import platform
 import time
-from collections.abc import Callable, Coroutine
+from collections import deque
+from collections.abc import Callable, Coroutine, Hashable
 from typing import Any
 
 from bleak import BleakClient
@@ -119,6 +120,60 @@ async def _read_device_metadata(
     return battery, firmware
 
 
+# Entries kept in the session trace (see RenphoScale._trace_frame). Runs of
+# near-identical frames collapse into one entry, so this spans several
+# weigh-ins rather than the tail of one.
+_TRACE_MAX_ENTRIES = 120
+
+
+def _parse_mac(address: str) -> bytes | None:
+    """Forward-order bytes of a colon-separated MAC, or None if not a MAC
+    (e.g. a macOS CoreBluetooth UUID)."""
+    octets = address.split(":")
+    if len(octets) != 6:
+        return None
+    try:
+        return bytes(int(o, 16) for o in octets)
+    except ValueError:
+        return None
+
+
+def mask_mac_echo(data: bytes, address: str, mac: bytes | None = None) -> str:
+    """Hex of ``data`` with the device-specific half of any echo of the
+    scale's MAC masked as ``xx``.
+
+    The scales echo their own MAC inside advertisements and some frames, in
+    forward or reversed byte order. The OUI half is kept — models are told
+    apart by it — and the unique half is masked so the result can be shared.
+    The MAC is taken from ``address``; where the platform does not expose it
+    there (macOS hands out a UUID), pass the six bytes as ``mac`` instead.
+    With neither, ``data`` comes back unmasked.
+    """
+    data = bytes(data)
+    text = data.hex()
+    mac = _parse_mac(address) or mac
+    if mac is None or len(mac) != 6:
+        return text
+    # (needle, offset of the unique three bytes within it)
+    for needle, unique_at in ((mac, 3), (mac[::-1], 0)):
+        start = data.find(needle)
+        while start != -1:
+            lo = (start + unique_at) * 2
+            text = text[:lo] + "xxxxxx" + text[lo + 6 :]
+            start = data.find(needle, start + 1)
+    return text
+
+
+def mask_hex_bytes(text: str, start: int, stop: int | None = None) -> str:
+    """``text`` (hex) with bytes ``start:stop`` replaced by ``xx``.
+
+    Indices are byte offsets and may be negative, as in a slice.
+    """
+    n = len(text) // 2
+    lo, hi, _ = slice(start, stop).indices(n)
+    return text[: lo * 2] + "x" * (max(hi - lo, 0) * 2) + text[hi * 2 :]
+
+
 class RenphoScale(abc.ABC):
     """
     Abstract base for every Renpho scale variant.
@@ -158,6 +213,14 @@ class RenphoScale(abc.ABC):
         self._cooldown_seconds = cooldown_seconds
         self._cooldown_end_time: float = 0
         self._bg_tasks: set[asyncio.Task] = set()
+        # Most recent advertisement from the target scale (raw), kept for
+        # :attr:`diagnostic_info`.
+        self._last_advertisement: dict[str, Any] | None = None
+        # What crossed the wire recently, in order, for :attr:`diagnostic_info`.
+        # One buffer across sessions — a tap-to-wake or a reconnect must not
+        # erase the session that mattered — with markers between them.
+        self._trace: deque[dict[str, Any]] = deque(maxlen=_TRACE_MAX_ENTRIES)
+        self._trace_t0: float | None = None
 
         if bleak_scanner_backend is None:
             scanner_kwargs: dict[str, Any] = {
@@ -219,6 +282,10 @@ class RenphoScale(abc.ABC):
         if ble_device.address != self.address:
             return
 
+        # Before the cooldown gate, so the snapshot stays current even while
+        # advertisements are otherwise being ignored.
+        self._record_advertisement(advertisement_data)
+
         if self._cooldown_seconds > 0 and time.time() < self._cooldown_end_time:
             self._logger.debug(
                 "Ignoring advertisement during cooldown (ends at %s)",
@@ -227,6 +294,160 @@ class RenphoScale(abc.ABC):
             return
 
         await self._handle_advertisement(ble_device, advertisement_data)
+
+    def _record_advertisement(self, advertisement_data: AdvertisementData) -> None:
+        """Keep a plain snapshot of the target scale's latest advertisement.
+
+        Runs on the path to a connection, so it must never raise: fields are
+        read defensively and anything unexpected is dropped.
+        """
+        try:
+            name = getattr(advertisement_data, "local_name", None)
+            rssi = getattr(advertisement_data, "rssi", None)
+            uuids = getattr(advertisement_data, "service_uuids", None) or []
+            mfr = getattr(advertisement_data, "manufacturer_data", None) or {}
+            self._last_advertisement = {
+                "timestamp": int(time.time()),
+                "local_name": name if isinstance(name, str) else None,
+                "rssi": rssi if isinstance(rssi, int) else None,
+                "service_uuids": [u for u in uuids if isinstance(u, str)],
+                "manufacturer_data": {
+                    int(company_id): bytes(payload)
+                    for company_id, payload in mfr.items()
+                },
+            }
+        except Exception:  # noqa: BLE001 - diagnostics must not break detection
+            self._logger.debug("Could not record advertisement", exc_info=True)
+
+    def _trace_key(self, direction: str, data: bytes) -> Hashable:
+        """What makes two consecutive frames "the same" for the trace.
+
+        A weigh-in streams dozens of frames that differ only in the weight;
+        consecutive frames with equal keys collapse into one entry (first,
+        last, count). Where the status sits is protocol knowledge, so
+        subclasses override this; by default only exact repeats collapse.
+        """
+        return data
+
+    def _trace_frame(
+        self, direction: str, data: bytes, note: str | None = None
+    ) -> None:
+        """Append a frame to the session trace. Never raises."""
+        try:
+            data = bytes(data)
+            now = time.monotonic()
+            if self._trace_t0 is None:
+                self._trace_t0 = now
+            t = round(now - self._trace_t0, 3)
+            key = (direction, note, self._trace_key(direction, data))
+            last = self._trace[-1] if self._trace else None
+            if last is not None and last.get("key") == key:
+                last["count"] = last.get("count", 1) + 1
+                last["last"] = data
+                last["t_last"] = t
+                return
+            entry: dict[str, Any] = {"t": t, "dir": direction, "data": data, "key": key}
+            if note is not None:
+                entry["note"] = note
+            self._trace.append(entry)
+        except Exception:  # noqa: BLE001 - diagnostics must not break a session
+            self._logger.debug("Could not trace frame", exc_info=True)
+
+    def _trace_event(self, event: str, *, marker: bool = False) -> None:
+        """Append a library decision or lifecycle event to the session trace.
+
+        A ``marker`` starts a new timebase: later entries' ``t`` counts from
+        it, and it alone carries wall-clock ``time``.
+        """
+        now = time.monotonic()
+        if marker or self._trace_t0 is None:
+            self._trace_t0 = now
+        entry: dict[str, Any] = {"t": round(now - self._trace_t0, 3), "event": event}
+        if marker:
+            entry["time"] = int(time.time())
+        self._trace.append(entry)
+
+    def _mask_profile_frame(self, data: bytes, text: str) -> str:
+        """Mask the personal fields of an outgoing profile frame.
+
+        ``data`` is the frame, ``text`` its hex (MAC already masked); return
+        ``text`` with the personal bytes replaced. Which frame is a profile
+        and where its fields sit is protocol knowledge, so subclasses that
+        send one override this. The frame itself always stays in the trace:
+        when a profile was written is what the trace is for.
+        """
+        return text
+
+    def _trace_snapshot(self, mask_profiles: bool) -> list[dict[str, Any]]:
+        out: list[dict[str, Any]] = []
+        for entry in self._trace:
+            item = {k: v for k, v in entry.items() if k != "key"}
+            for field in ("data", "last"):
+                if field in item:
+                    raw = item[field]
+                    text = self._mask(raw)
+                    if mask_profiles and item.get("dir") == "tx":
+                        text = self._mask_profile_frame(raw, text)
+                    item[field] = text
+            out.append(item)
+        return out
+
+    @property
+    def diagnostic_info(self) -> dict[str, Any]:
+        """:meth:`get_diagnostic_info` with its defaults (frames verbatim)."""
+        return self.get_diagnostic_info()
+
+    def get_diagnostic_info(self, *, mask_profiles: bool = False) -> dict[str, Any]:
+        """JSON-safe snapshot of what the scale advertises and how its last
+        session behaved, for bug reports.
+
+        Always carries ``protocol``, ``model_code``, ``model_label``
+        (``"unknown"`` for an unregistered code, ``None`` when no code has
+        been seen), ``flavor`` and ``trace`` — the recent frames in both
+        directions, in order, with runs of near-identical frames collapsed
+        and the library's decisions interleaved. Frames are otherwise
+        verbatim, so they carry measurements and any profile sent. MAC
+        echoes inside payloads are masked (see :func:`mask_mac_echo`).
+
+        ``mask_profiles=True`` also masks the personal fields (sex, age or
+        birth date, height) of outgoing profile frames, for dumps that end
+        up posted in public. Measurements are never masked.
+        """
+        adv = self._last_advertisement
+        info: dict[str, Any] = {
+            "scale_class": type(self).__name__,
+            "protocol": None,
+            "model_code": None,
+            "model_label": None,
+            "flavor": None,
+            "advertisement": None
+            if adv is None
+            else {
+                **adv,
+                "manufacturer_data": {
+                    f"0x{company_id:04x}": self._mask(payload)
+                    for company_id, payload in adv["manufacturer_data"].items()
+                },
+            },
+        }
+        info.update(self._protocol_diagnostics())
+        info["trace"] = self._trace_snapshot(mask_profiles)
+        return info
+
+    def _protocol_diagnostics(self) -> dict[str, Any]:
+        """Protocol-specific entries for :attr:`diagnostic_info`."""
+        return {}
+
+    def _advertised_mac(self) -> bytes | None:
+        """The MAC as echoed in the latest advertisement, forward order.
+
+        Only consulted when :attr:`address` is not a MAC. Where the echo sits
+        is protocol knowledge, so each subclass supplies it.
+        """
+        return None
+
+    def _mask(self, data: bytes) -> str:
+        return mask_mac_echo(data, self.address, self._advertised_mac())
 
     @abc.abstractmethod
     async def _handle_advertisement(
@@ -371,6 +592,7 @@ class GattScale(RenphoScale, abc.ABC):
             self._logger.debug("Scale disconnected (torn down after setup failure)")
             return
         self._logger.debug("Scale disconnected")
+        self._trace_event("disconnected")
         self._cooldown_end_time = time.time() + self._cooldown_seconds
         self._client = None
 
@@ -388,6 +610,7 @@ class GattScale(RenphoScale, abc.ABC):
             self._logger.debug("Error disconnecting during teardown", exc_info=True)
 
     def _register_setup_failure(self, reason: str) -> None:
+        self._trace_event(f"session setup failed: {reason}")
         self._consecutive_setup_failures += 1
         if self._consecutive_setup_failures >= self._MAX_CONSECUTIVE_SETUP_FAILURES:
             self._consecutive_setup_failures = 0
@@ -436,6 +659,24 @@ class GattScale(RenphoScale, abc.ABC):
 
         try:
             try:
+                # Once per connection attempt, not per advertisement: this is
+                # the only place a debug log records what the scale
+                # broadcasts (its model identifier in particular).
+                adv = self._last_advertisement or {}
+                self._logger.debug(
+                    "Advertisement from %s: name=%r rssi=%s service_uuids=%s "
+                    "manufacturer_data=[%s]",
+                    self.address,
+                    adv.get("local_name"),
+                    adv.get("rssi"),
+                    adv.get("service_uuids"),
+                    ", ".join(
+                        f"company=0x{company_id:04x} {payload.hex()}"
+                        for company_id, payload in adv.get(
+                            "manufacturer_data", {}
+                        ).items()
+                    ),
+                )
                 self._logger.debug("Connecting to scale: %s", self.address)
                 self._client = await establish_connection(
                     BleakClient,
@@ -457,6 +698,7 @@ class GattScale(RenphoScale, abc.ABC):
                 self._register_setup_failure("client not connected")
                 return
 
+            self._trace_event("session start", marker=True)
             try:
                 await self._start_scale_session(ble_device)
             except ScaleSessionError as ex:
@@ -533,6 +775,8 @@ class AdvertisementScale(RenphoScale, abc.ABC):
     ) -> None:
         for company_id, mfr_bytes in advertisement_data.manufacturer_data.items():
             payload = bytearray(mfr_bytes)
+            # No session here: the advertisements are the whole conversation.
+            self._trace_frame("adv", payload)
             self._logger.debug(
                 "Raw manufacturer data from %s: company=0x%04x %s",
                 ble_device.address,

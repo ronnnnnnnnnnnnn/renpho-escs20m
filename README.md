@@ -534,6 +534,41 @@ identifier registry grows.
 - `scale.firmware_revision` — last successfully-read firmware revision
   string (`str | None`). May be `None` until first successful read or
   when response is empty.
+- `scale.diagnostic_info` — JSON-safe `dict` for bug reports, available on
+  every scale class. The common keys are `scale_class`, `protocol`,
+  `model_code`, `model_label` (`"unknown"` for an unregistered identifier,
+  `None` when none has been seen), `flavor`, `advertisement` and `trace`.
+  - `advertisement` is a snapshot (timestamp, name, RSSI, service UUIDs,
+    manufacturer data) of the scale's latest advertisement, refreshed even
+    while a cooldown is open.
+  - `trace` is what recently crossed the wire, in order: entries with `dir`
+    (`"rx"`/`"tx"`), `data` (hex) and `t` (seconds), interleaved with the
+    library's own `event` entries (`"session start"`, `"disconnected"`,
+    `"session setup failed: …"`, the profile resolver's outcome). A
+    `"session start"` entry restarts `t` and carries wall-clock `time`.
+    Consecutive frames that differ only in the weight collapse into one
+    entry with `count`, `last` and `t_last`. The buffer holds the last 120
+    entries across sessions, so a tap-to-wake or a reconnect does not erase
+    the weigh-in before it.
+  - **Frames are verbatim**: they carry the measurements, and any profile
+    sent to the scale (sex, age, height). If your dumps end up posted in
+    public, you can call `scale.get_diagnostic_info(mask_profiles=True)`
+    instead of the property: the personal bytes of outgoing profile frames
+    are then masked too (the frame, its algorithm byte and its timing stay —
+    when a profile was written is what the trace is for). Measurements are
+    never masked. By default only the scale's MAC is masked — the
+    device-specific half of every echo of it (`mask_mac_echo`); the OUI is
+    kept because models are told apart by it.
+  - `model_label(protocol, model_code)` gives the same description for a
+    code obtained elsewhere.
+
+  On this variant the model identifier comes from the advertisement (on some
+  models only from the scan response, which a passive scanner never relays),
+  while `flavor` is only learned from a session's frames. It adds
+  `transport` (`"fff0"` or `"ffe0"`, the GATT layout the scale exposed) and
+  `vendor_byte` (the per-device byte the scale stamps on its frames). These
+  and `flavor` survive disconnects, since a dump is usually taken after the
+  scale has gone back to sleep.
 - `BluetoothScanningMode` — `ACTIVE` (default) / `PASSIVE`, passed via
   the `scanning_mode` kwarg. `PASSIVE` only takes effect on Linux
   (BlueZ); other platforms fall back to active.
@@ -573,6 +608,17 @@ identifier registry grows.
   is delivered as weight only. On the extended flavor, a scale that powers off
   without ever releasing a final still reports the settled weight, alone, a
   second later; a final arriving inside that second wins.
+- `scale.diagnostic_info` — as on the QN variant (common keys, advertisement
+  snapshot, `trace`). Here `model_code` is the identifier the client runs
+  on — adopted from the advertisement, or the `model_id` you passed — and
+  `flavor` follows from it, so both are known before any connection. The
+  trace records raw notifications, so an extended unit's fragment headers
+  show; each `tx` entry has a `note` naming what was written (which is how a
+  resolved profile is told from the placeholder), and the reason a
+  placeholder went out (the resolver returned `None`, raised, timed out or
+  was cancelled) or a refused write appears as an `event`. A profile frame carries the sex,
+  date of birth and height; `get_diagnostic_info(mask_profiles=True)` masks
+  those and keeps the slot, last weight and flags.
 - Stored offline records (basic `0x15`, extended `0x19`) are logged and
   discarded, never reported as live readings. `clear_stored_measurements=True`
   acknowledges each one (basic `0x95`, extended `0x99`); on the R-A016 a single
@@ -597,6 +643,10 @@ identifier registry grows.
     no `battery_level` / `firmware_revision`.
   - Weight-only, and validated against captured advertisements rather than
     live hardware.
+  - `scale.diagnostic_info` carries the common keys only: this variant
+    advertises no model identifier and has no flavors, so `model_code`,
+    `model_label` and `flavor` stay `None`. With no session, its `trace` is
+    the advertisement burst itself (`dir` `"adv"`), collapsed by status byte.
 
 ### Extending the library
 

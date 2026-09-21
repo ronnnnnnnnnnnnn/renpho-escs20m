@@ -10,6 +10,7 @@ retries, and arms the cooldown only after the consecutive-failure bound.
 
 from __future__ import annotations
 
+import logging
 import time
 from unittest.mock import AsyncMock, MagicMock
 
@@ -188,3 +189,36 @@ def test_scale_session_error_is_exported():
 
     assert exported is ScaleSessionError
     assert issubclass(exported, Exception)
+
+
+@pytest.mark.asyncio
+async def test_triggering_advertisement_is_debug_logged(monkeypatch, caplog):
+    """The advertisement that triggers a connection is the only record of
+    what the scale broadcasts (model identifier included) in a debug log."""
+    scale = _make_scale()
+    _patch_connection(monkeypatch, [_make_client(_FFF0_CHARS)])
+    adv = MagicMock()
+    adv.local_name = "QN-Scale"
+    adv.manufacturer_data = {0xFFFF: bytes.fromhex("099b0123456789")}
+    adv.service_uuids = ["0000fff0-0000-1000-8000-00805f9b34fb"]
+    adv.rssi = -61
+
+    with caplog.at_level(logging.DEBUG):
+        await scale._advertisement_callback(_make_ble_device(), adv)
+
+    assert "company=0xffff 099b0123456789" in caplog.text
+    assert "0000fff0-0000-1000-8000-00805f9b34fb" in caplog.text
+    assert "QN-Scale" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_advertisement_without_manufacturer_data_still_connects(monkeypatch):
+    """The debug line sits on the connection path; it must never abort it."""
+    scale = _make_scale()
+    connect = _patch_connection(monkeypatch, [_make_client(_FFF0_CHARS)])
+    adv = MagicMock()
+    adv.manufacturer_data = None
+
+    await scale._advertisement_callback(_make_ble_device(), adv)
+
+    connect.assert_awaited_once()

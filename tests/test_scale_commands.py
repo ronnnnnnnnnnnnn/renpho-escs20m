@@ -930,6 +930,112 @@ async def test_pre_measurement_len5_skips_profile_for_non_renpho():
     assert not any(h.startswith("a00d02") for h in sent), sent
 
 
+# --- ES-30M (ES30MA2, fw V20.0): 6-byte pre-measurement, 0xF0 final --------
+#
+# Real frames from a field log. This extended-flavor unit appends its battery
+# level to the pre-measurement frame (21 06 ff 01 <battery> <chk>) and marks
+# the final of a reading it could not attribute to a user with 0xF0.
+
+
+@pytest.mark.asyncio
+async def test_pre_measurement_len6_sends_profile_for_renpho():
+    """The 6-byte pre-measurement is still a profile request — without a
+    reply the scale never streams and stores the reading offline instead."""
+    scale, _ = _mn_scale()
+    scale._notification_handler(
+        MagicMock(), bytearray.fromhex("2106ff01547b"), "QN-Scale", "addr"
+    )
+    await asyncio.sleep(0)
+    scale._safe_write.assert_awaited_once()
+    assert scale._safe_write.await_args[0][0].hex().startswith("a00d02")
+
+
+@pytest.mark.asyncio
+async def test_pre_measurement_longer_than_len6_sends_profile_for_renpho():
+    """Synthetic: a still-longer frame routes to the profile path too. An
+    unanswered profile request loses the reading; an unneeded profile reply
+    is ignored by a scale that streams on its own."""
+    scale, _ = _mn_scale()
+    scale._notification_handler(
+        MagicMock(), bytearray.fromhex("2107ff015400" + "7c"), "QN-Scale", "addr"
+    )
+    await asyncio.sleep(0)
+    scale._safe_write.assert_awaited_once()
+    assert scale._safe_write.await_args[0][0].hex().startswith("a00d02")
+
+
+@pytest.mark.asyncio
+async def test_pre_measurement_len6_skips_profile_for_non_renpho():
+    """The vendor-byte gate applies to the 6-byte form as well."""
+    scale, _ = _mn_scale()
+    scale._notification_handler(
+        MagicMock(), bytearray.fromhex("120f15" + "00" * 12), "QN-Scale1", "addr"
+    )
+    scale._notification_handler(
+        MagicMock(), bytearray.fromhex("2106150154" + "91"), "QN-Scale1", "addr"
+    )
+    await asyncio.sleep(0)
+    sent = [c.args[0].hex() for c in scale._safe_write.call_args_list]
+    assert not any(h.startswith("a00d02") for h in sent), sent
+
+
+@pytest.mark.asyncio
+async def test_pre_measurement_len6_uses_extended_stored_query():
+    """The basic 22 04 query must not go out on this unit: it answers with
+    extended-layout records, and the drain belongs after the profile ack."""
+    scale, _ = _make_scale(clear_stored_measurements=True)
+    scale._safe_write = AsyncMock()
+    scale._notification_handler(
+        MagicMock(), bytearray.fromhex("2106ff01547b"), "QN-Scale", "addr"
+    )
+    await asyncio.sleep(0)
+    sent = [c.args[0].hex() for c in scale._safe_write.call_args_list]
+    assert not any(h.startswith("22") for h in sent), sent
+
+    scale._notification_handler(
+        MagicMock(), bytearray.fromhex("a10602fe01a8"), "QN-Scale", "addr"
+    )
+    await asyncio.sleep(0)
+    sent = [c.args[0].hex() for c in scale._safe_write.call_args_list]
+    assert "2206ff000128" in sent, sent
+
+
+@pytest.mark.asyncio
+async def test_final_with_unassigned_user_id_delivers_without_warning(caplog):
+    """0xF0 in the user byte means "not attributed to a user", it should not
+    warn on every final frame."""
+    scale, callback = _make_scale()
+    scale._safe_write = AsyncMock()
+    with caplog.at_level(logging.WARNING):
+        scale._notification_handler(
+            MagicMock(),
+            bytearray.fromhex("100efff002258501fa01f80000ad"),
+            "QN-Scale",
+            "addr",
+        )
+        await asyncio.sleep(0)
+    assert "non-guest" not in caplog.text
+    callback.assert_called_once()
+    measurements = callback.call_args[0][0].measurements
+    assert measurements[WEIGHT_KEY] == pytest.approx(96.05)
+    assert measurements[RESISTANCE_1_KEY] == 506
+    assert measurements[RESISTANCE_2_KEY] == 504
+
+
+@pytest.mark.asyncio
+async def test_measurement_with_registered_user_id_still_warns(caplog):
+    """A slot index in the user byte means the scale is not in guest mode."""
+    scale, _ = _make_scale()
+    scale._safe_write = AsyncMock()
+    payload = _measurement_payload(_MEASUREMENT_STATUS_STABLE)
+    payload[3] = 0x01
+    payload[13] = sum(payload[0:13]) & 0xFF
+    with caplog.at_level(logging.WARNING):
+        scale._notification_handler(MagicMock(), payload, "QN-Scale", "addr")
+        await asyncio.sleep(0)
+    assert "non-guest user_id 0x01" in caplog.text
+
+
 # --- Stored offline measurements (22 04 query / 23 13 records) -------------
 #
 # All frames below are real captured bytes from Renpho-app sessions. The

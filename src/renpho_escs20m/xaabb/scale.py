@@ -8,14 +8,15 @@ The display unit is *observed* from the advertisement (it cannot be set).
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Hashable
+from typing import Any
 
 from bleak.backends.scanner import BaseBleakScanner
 
 from ..const import WEIGHT_KEY
 from ..data import BluetoothScanningMode, ScaleData, WeightUnit
 from ..scale import AdvertisementScale
-from .protocol import parse_broadcast
+from .protocol import _MAGIC, parse_broadcast
 
 # Transient key used to hand the observed unit from ``_parse`` to
 # ``_display_unit_for`` without leaking it into ``measurements``.
@@ -76,3 +77,24 @@ class RenphoAABBScale(AdvertisementScale):
     ) -> WeightUnit | None:
         unit = parsed.pop(_DISPLAY_UNIT_ENTRY, None)
         return unit if isinstance(unit, WeightUnit) else None
+
+    def _protocol_diagnostics(self) -> dict[str, Any]:
+        # Broadcast-only: there is no session and no model identifier — the
+        # advertisement snapshot is everything there is to report.
+        # Imported here: ``detection`` imports this package's ``protocol``
+        # module, so a module-level import would be circular.
+        from ..detection import ScaleProtocol
+
+        return {"protocol": ScaleProtocol.AABB.value}
+
+    def _advertised_mac(self) -> bytes | None:
+        adv = self._last_advertisement
+        for payload in adv["manufacturer_data"].values() if adv else ():
+            if len(payload) >= 8 and payload[:2] == _MAGIC:
+                return payload[2:8]
+        return None
+
+    def _trace_key(self, direction: str, data: bytes) -> Hashable:
+        # The burst repeats with only the weight changing; the status byte
+        # is what tells a run apart.
+        return data[15] if len(data) > 15 else data

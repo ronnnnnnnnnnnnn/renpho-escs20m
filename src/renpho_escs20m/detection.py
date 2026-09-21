@@ -40,6 +40,7 @@ import logging
 from enum import StrEnum
 
 from .x55aa.protocol import KNOWN_MODEL_IDS as X55AA_KNOWN_MODEL_IDS
+from .x55aa.protocol import MODEL_LABELS as _X55AA_MODEL_LABELS
 from .x55aa.protocol import SUPPORTED_COMPANY_IDS as X55AA_COMPANY_IDS
 from .x55aa.protocol import is_advertisement as _is_x55aa_advertisement
 from .x55aa.protocol import parse_model_id as _parse_x55aa_model_id
@@ -72,6 +73,13 @@ def _mac_bytes(address: str) -> bytes | None:
         return bytes(int(o, 16) for o in octets)
     except ValueError:
         return None
+
+
+def qn_advertised_mac(payload: bytes) -> bytes | None:
+    """The MAC echoed in a QN (65535) payload, forward order, or None."""
+    if len(payload) < _QN_MAC_SLICE.stop:
+        return None
+    return bytes(payload[_QN_MAC_SLICE])[::-1]
 
 
 def parse_qn_model_code(payload: bytes) -> int | None:
@@ -127,15 +135,39 @@ def is_aabb_frame(payload: bytes, address: str | None = None) -> bool:
 # Model identifiers (payload bytes 0:2 big-endian)
 # Unknown variants are covered by FALLBACK_MATCHERS and reported via the log below.
 # Add new identifiers as units are reported.
-KNOWN_QN_SCALE_IDENTIFIERS: frozenset[int] = frozenset(
-    {
-        0x095B,  # "Renpho-Scale", FF:04:00 OUI
-        0x099B,  # "QN-Scale", FF:04:00 OUI
-        0x09E9,  # "QN-Scale", FF:03:00 OUI
-        0x0216,  # "QN-Scale", D8:0B:CB OUI
-        0x0C77,  # "Renpho-Scale", FF:05:00 OUI (R-MSB01)
-    }
-)
+# The label says what each identifier has been seen on — a description for
+# bug reports, not a marketed-model lookup (one identifier spans several
+# product names and firmware revisions).
+QN_SCALE_IDENTIFIER_LABELS: dict[int, str] = {
+    0x095B: '"Renpho-Scale", FF:04:00 OUI',
+    0x099B: '"QN-Scale", FF:04:00 OUI',
+    0x09E9: '"QN-Scale", FF:03:00 OUI',
+    0x0216: '"QN-Scale", D8:0B:CB OUI',
+    0x0C77: '"Renpho-Scale", FF:05:00 OUI (R-MSB01)',
+}
+KNOWN_QN_SCALE_IDENTIFIERS: frozenset[int] = frozenset(QN_SCALE_IDENTIFIER_LABELS)
+
+
+def model_label(protocol: ScaleProtocol | str, model_code: int | None) -> str | None:
+    """Describe an advertised model identifier for a bug report.
+
+    ``None`` when there is nothing to describe — no identifier, or a
+    protocol without an identifier registry — and ``"unknown"`` for an
+    identifier that is not registered.
+    """
+    if model_code is None:
+        return None
+    # Built for diagnostics, so it never raises: a protocol that has no
+    # registry (or is not a protocol at all) simply has no label to give.
+    try:
+        labels = {
+            ScaleProtocol.QN: QN_SCALE_IDENTIFIER_LABELS,
+            ScaleProtocol.X55AA: _X55AA_MODEL_LABELS,
+        }.get(ScaleProtocol(protocol))
+    except ValueError:
+        return None
+    return None if labels is None else labels.get(model_code, "unknown")
+
 
 # (company_id, identifier) pairs already reported via the fallback-path log.
 _reported_identifiers: set[tuple[int, int]] = set()

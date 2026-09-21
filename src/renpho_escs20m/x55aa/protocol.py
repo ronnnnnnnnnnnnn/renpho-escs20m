@@ -121,6 +121,14 @@ KNOWN_BASIC_MODEL_IDS: frozenset[int] = frozenset({0x0003})
 KNOWN_EXTENDED_MODEL_IDS: frozenset[int] = frozenset({0x0030, 0x0031})
 KNOWN_MODEL_IDS: frozenset[int] = KNOWN_BASIC_MODEL_IDS | KNOWN_EXTENDED_MODEL_IDS
 
+# What each identifier has been seen on — a description for bug reports, not
+# a marketed-model lookup (one identifier spans several product names).
+MODEL_LABELS: dict[int, str] = {
+    0x0003: "basic flavor (ES-CS20MB1, R-A012, R-A016, ES-26BB-B)",
+    0x0030: "extended flavor (sibling revision of ESCS20MB2)",
+    0x0031: "extended flavor (ES-CS20M HVIN ESCS20MB2 / Elis 1)",
+}
+
 # Models on which the set-time command's 9-byte epoch layout is
 # capture-verified. Kept as a per-model allow-list rather than a flavor
 # property: the clock is state the scale persists, so a layout that has not

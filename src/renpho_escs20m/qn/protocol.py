@@ -37,6 +37,7 @@ _OP_PRE_MEASUREMENT = 0x21
 _OP_STORED_MEASUREMENT = 0x23
 _OP_STORED_METRICS_1 = 0x24
 _OP_STORED_METRICS_2 = 0x25
+_OP_USER_PROFILE = 0xA0  # our profile command
 _OP_PROFILE_ACK = 0xA1
 
 # Frame length (byte 1) — selects the flavor on the measurement and
@@ -45,6 +46,7 @@ _LEN_EXTENDED_MEASUREMENT = 0x0E  # 14-byte frame, body fat on-device
 # Same layout plus one unknown trailing byte before the checksum (R-MSB01).
 _LEN_EXTENDED_MEASUREMENT_LONG = 0x0F
 _LEN_BASIC_MEASUREMENT = 0x0B  # 11-byte frame, weight + impedance
+# Minimum length: some extended units append their battery level (21 06).
 _LEN_EXTENDED_PRE_MEASUREMENT = 0x05  # scale wants a user-profile reply
 _LEN_BASIC_PRE_MEASUREMENT = 0x04  # no reply needed; scale streams on its own
 _LEN_STORED_MEASUREMENT = 0x13  # 19-byte stored offline-measurement record
@@ -69,6 +71,9 @@ _BASIC_STATUS_FINAL = 0x01
 # recognizes the session as ephemeral (no slot allocated, nothing stored),
 # so the library coexists safely with the official Renpho app.
 _GUEST_USER_ID = 0xFE
+# Some firmware marks the final of a reading it attributed to no user
+# with this index instead of echoing the guest sentinel.
+_UNASSIGNED_USER_ID = 0xF0
 _GUEST_PAD_HI = 0xFF
 _GUEST_PAD_LO = 0xEE
 _USER_PROFILE_TRAILER_TAIL = 0x02
@@ -278,7 +283,7 @@ def build_user_profile_command(
     flag_byte = (int(algorithm) + (0x0A if athlete else 0)) & 0xFF
     payload = bytearray(
         [
-            0xA0,
+            _OP_USER_PROFILE,
             0x0D,
             0x02,
             _GUEST_USER_ID,

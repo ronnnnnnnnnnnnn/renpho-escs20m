@@ -24,7 +24,8 @@ from __future__ import annotations
 import asyncio
 import datetime
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Hashable
+from typing import Any
 
 from bleak import BleakClient
 from bleak.backends.characteristic import BleakGATTCharacteristic
@@ -39,8 +40,9 @@ from ..const import (
     X55AA_NOTIFY_CHARACTERISTIC_UUID,
 )
 from ..data import BluetoothScanningMode, ScaleData, WeightUnit
-from ..scale import GattScale, ScaleSessionError
+from ..scale import GattScale, ScaleSessionError, mask_hex_bytes
 from .protocol import (
+    ADV_MAC_SLICE,
     CMD_ACK,
     CMD_EXTENDED_MEASUREMENT,
     CMD_EXTENDED_STORED_RECORD,
@@ -50,6 +52,7 @@ from .protocol import (
     CMD_STATUS,
     CMD_STATUS_ALT,
     CMD_STORED_RECORD,
+    CMD_USER_PROFILE,
     MANUFACTURER_ID,
     SET_TIME_MODEL_IDS,
     ForbiddenWrite,
@@ -323,6 +326,51 @@ class Renpho55AAScale(GattScale):
             name="x55aa-display-unit",
         )
 
+    def _protocol_diagnostics(self) -> dict[str, Any]:
+        # The flavor follows from the model identifier, which every
+        # advertisement carries (or the caller supplied) — nothing here
+        # depends on a session having run.
+        # Imported here: ``detection`` imports this package's ``protocol``
+        # module, so a module-level import would be circular.
+        from ..detection import ScaleProtocol, model_label
+
+        model_id = self._model_id
+        return {
+            "protocol": ScaleProtocol.X55AA.value,
+            "model_code": None if model_id is None else f"0x{model_id:04x}",
+            "model_label": model_label(ScaleProtocol.X55AA, model_id),
+            "flavor": (
+                None
+                if model_id is None
+                else ("extended" if self._extended else "basic")
+            ),
+        }
+
+    def _trace_key(self, direction: str, data: bytes) -> Hashable:
+        # Live measurement frames repeat with only the weight changing;
+        # command + status is what tells a run apart.
+        if len(data) >= 6 and data[:2] == b"\x55\xaa" and data[2] == CMD_MEASUREMENT:
+            return (data[2], data[5])
+        return data
+
+    def _mask_profile_frame(self, data: bytes, text: str) -> str:
+        # 5-byte header, 14-byte payload, checksum.
+        if len(data) != 20 or data[:2] != b"\x55\xaa" or data[2] != CMD_USER_PROFILE:
+            return text
+        # Payload [0] packs sex (high nibble) with the slot (low nibble):
+        # only the sex goes. Then birth date (4) and height (2). Last weight,
+        # flags and trailer stay; the checksum goes, since it would give away
+        # the sum of the hidden bytes.
+        text = text[:10] + "x" + text[11:]
+        return mask_hex_bytes(mask_hex_bytes(text, 6, 12), -1)
+
+    def _advertised_mac(self) -> bytes | None:
+        adv = self._last_advertisement
+        payload = adv and adv["manufacturer_data"].get(MANUFACTURER_ID)
+        if not payload or not is_advertisement(payload, self.address):
+            return None
+        return payload[ADV_MAC_SLICE]
+
     async def _handle_advertisement(
         self, ble_device: BLEDevice, advertisement_data: AdvertisementData
     ) -> None:
@@ -506,6 +554,8 @@ class Renpho55AAScale(GattScale):
         address: str,
     ) -> None:
         self._logger.debug("0x55aa RX payload from %s: %s", address, payload.hex())
+        # Raw notifications, so an extended unit's fragment headers show.
+        self._trace_frame("rx", payload)
         # The extended flavor splits a frame longer than one notification into
         # chunks behind a 3-byte header; a plain frame starts with the magic
         # and passes through untouched. The basic flavor has no frame long
@@ -856,6 +906,7 @@ class Renpho55AAScale(GattScale):
             self._logger.debug(
                 "0x55aa profile resolver cancelled for %s (session ended)", address
             )
+            self._trace_event("profile resolver cancelled")
             raise
         except TimeoutError:
             self._logger.warning(
@@ -865,6 +916,7 @@ class Renpho55AAScale(GattScale):
                 address,
                 weight_kg,
             )
+            self._trace_event("profile resolver timed out")
         except Exception:
             self._logger.exception(
                 "0x55aa profile resolver raised for %s at weight=%.2f; sending the "
@@ -872,6 +924,10 @@ class Renpho55AAScale(GattScale):
                 address,
                 weight_kg,
             )
+            self._trace_event("profile resolver raised")
+        else:
+            if profile is None:
+                self._trace_event("profile resolver returned none")
         if profile is not None and not isinstance(profile, X55AAProfile):
             self._logger.error(
                 "0x55aa profile resolver for %s returned %s, not an X55AAProfile; "
@@ -879,6 +935,7 @@ class Renpho55AAScale(GattScale):
                 address,
                 type(profile).__name__,
             )
+            self._trace_event("profile resolver returned a non-profile")
             profile = None
         if profile is None:
             self._logger.debug(
@@ -1042,6 +1099,7 @@ class Renpho55AAScale(GattScale):
                 data.hex(),
                 exc,
             )
+            self._trace_event(f"refused forbidden write: {what}")
             return
         async with self._write_lock:
             client = self._client
@@ -1056,6 +1114,9 @@ class Renpho55AAScale(GattScale):
                 # The command characteristic supports write-with-response only.
                 await client.write_gatt_char(command_char, data, response=True)
                 self._logger.debug("0x55aa TX %s: %s", what, data.hex())
+                # ``what`` tells a resolved profile from the placeholder — the
+                # resolver's outcome, which the frame alone does not show.
+                self._trace_frame("tx", data, note=what)
             except Exception:
                 self._logger.exception(
                     "0x55aa failed to write %s (%s)", what, data.hex()

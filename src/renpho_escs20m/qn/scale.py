@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Hashable
 from typing import Any
 
 from bleak.backends.characteristic import BleakGATTCharacteristic
@@ -37,8 +37,17 @@ from ..const import (
     WEIGHT_KEY,
 )
 from ..data import BluetoothScanningMode, ScaleData, WeightUnit
-from ..detection import has_obfuscated_resistance, sends_metrics_panel
-from ..scale import GattScale, ScaleSessionError
+from ..detection import (
+    QN_MANUFACTURER_ID,
+    ScaleProtocol,
+    has_obfuscated_resistance,
+    is_qn_frame,
+    model_label,
+    parse_qn_model_code,
+    qn_advertised_mac,
+    sends_metrics_panel,
+)
+from ..scale import GattScale, ScaleSessionError, mask_hex_bytes
 from .protocol import (
     Profile,
     ProfileResolver,
@@ -67,6 +76,8 @@ from .protocol import (
     _OP_STORED_METRICS_1,
     _OP_STORED_METRICS_2,
     _OP_UNIT_REQUEST,
+    _OP_USER_PROFILE,
+    _UNASSIGNED_USER_ID,
     _build_command_for_profile,
     build_end_measurement_command,
     build_extended_stored_measurement_query,
@@ -227,6 +238,15 @@ class RenphoQNScale(GattScale):
         # byte, so the record handler must pick the matching parser.
         self._stored_records_extended = False
 
+        # State and decisions that no frame in the trace spells out, for
+        # ``diagnostic_info``. Deliberately NOT reset per session: a dump is
+        # usually taken after the scale has gone back to sleep.
+        self._observed: dict[str, Any] = {
+            "transport": None,
+            "vendor_byte": None,
+            "flavor": None,
+        }
+
         # The final measurement awaiting its extended-metrics frames, and
         # the panel accumulated from them. Set only for models registered
         # as panel-senders (detection.sends_metrics_panel): those send
@@ -238,6 +258,50 @@ class RenphoQNScale(GattScale):
         self._pending_metrics: dict[str, Any] = {}
         self._metrics_flush_seconds = _METRICS_PANEL_FLUSH_SECONDS
         self._metrics_flush_task: asyncio.Task | None = None
+
+    def _protocol_diagnostics(self) -> dict[str, Any]:
+        # The model identifier travels in the advertisement (on some models
+        # only in the scan response, which passive scanners never relay);
+        # everything else is only learned from a session's frames.
+        model_code = None
+        adv = self._last_advertisement
+        if adv is not None:
+            payload = adv["manufacturer_data"].get(QN_MANUFACTURER_ID)
+            if payload is not None and is_qn_frame(payload, self.address):
+                model_code = parse_qn_model_code(payload)
+
+        def _hex(value: int | None) -> str | None:
+            return None if value is None else f"0x{value:02x}"
+
+        seen = self._observed
+        return {
+            "protocol": ScaleProtocol.QN.value,
+            "model_code": None if model_code is None else f"0x{model_code:04x}",
+            "model_label": model_label(ScaleProtocol.QN, model_code),
+            "flavor": seen["flavor"],
+            "transport": seen["transport"],
+            "vendor_byte": _hex(seen["vendor_byte"]),
+        }
+
+    def _trace_key(self, direction: str, data: bytes) -> Hashable:
+        # Measurement frames repeat many times a second with only the weight
+        # changing; opcode + length + status is what tells a run apart.
+        if len(data) >= 6 and data[0] == _OP_MEASUREMENT:
+            status = data[5] if data[1] == _LEN_BASIC_MEASUREMENT else data[4]
+            return (data[0], data[1], status)
+        return data
+
+    def _mask_profile_frame(self, data: bytes, text: str) -> str:
+        if len(data) != 13 or data[0] != _OP_USER_PROFILE:
+            return text
+        # sex, age, height (2). The algorithm byte and trailer stay; the
+        # checksum goes, since it would give away the sum of the hidden bytes.
+        return mask_hex_bytes(mask_hex_bytes(text, 6, 10), -1)
+
+    def _advertised_mac(self) -> bytes | None:
+        adv = self._last_advertisement
+        payload = adv and adv["manufacturer_data"].get(QN_MANUFACTURER_ID)
+        return qn_advertised_mac(payload) if payload else None
 
     def _unavailable_callback(self, client) -> None:
         super()._unavailable_callback(client)
@@ -274,10 +338,12 @@ class RenphoQNScale(GattScale):
         if weight_char := client.services.get_characteristic(
             NOTIFY_CHARACTERISTIC_UUID
         ):
+            self._observed["transport"] = "fff0"
             await client.start_notify(weight_char, handler)
         elif weight_char := client.services.get_characteristic(
             FFE0_NOTIFY_CHARACTERISTIC_UUID
         ):
+            self._observed["transport"] = "ffe0"
             await client.start_notify(weight_char, handler)
             # The FFE0 transport delivers the pre-measurement and
             # stored-record frames as indications on FFE2, not on FFE1.
@@ -301,6 +367,7 @@ class RenphoQNScale(GattScale):
         address: str,
     ) -> None:
         self._logger.debug("ES-CS20M RX payload: %s", payload.hex())
+        self._trace_frame("rx", payload)
         if len(payload) < 2:
             self._logger.debug(
                 "ES-CS20M ignoring unrecognized payload: %s", payload.hex()
@@ -336,6 +403,7 @@ class RenphoQNScale(GattScale):
                     _DEFAULT_VENDOR_BYTE,
                 )
             self._vendor_byte = vendor
+            self._observed["vendor_byte"] = vendor
 
         # Dispatch by opcode (byte 0); byte 1 (length) selects the flavor on
         # the measurement and pre-measurement frames. The extended flavor
@@ -351,12 +419,19 @@ class RenphoQNScale(GattScale):
             # renpho vendor byte. A non-renpho scale that happens to send the
             # same length (e.g. 21 05 with a different vendor byte) is treated
             # as basic: no profile reply, it streams measurements on its own.
+            # The length is a minimum, not an exact match: some extended units
+            # append their battery level (21 06). Leaving a profile request
+            # unanswered loses the reading (the scale never streams and stores
+            # it offline), while a scale that streams on its own ignores a
+            # profile it didn't ask for — so longer frames route here too.
             if (
-                length == _LEN_EXTENDED_PRE_MEASUREMENT
+                length >= _LEN_EXTENDED_PRE_MEASUREMENT
                 and self._vendor_byte == _DEFAULT_VENDOR_BYTE
             ):
+                self._observed["flavor"] = "extended"
                 self._handle_extended_pre_measurement(address)
             else:
+                self._observed["flavor"] = "basic"
                 self._handle_basic_pre_measurement(address)
         elif opcode == _OP_MEASUREMENT and length in (
             _LEN_EXTENDED_MEASUREMENT,
@@ -366,8 +441,10 @@ class RenphoQNScale(GattScale):
             # Both are matched exactly rather than with >=, so that a longer
             # frame from some future variant surfaces in the log below instead
             # of being parsed on an assumption.
+            self._observed["flavor"] = "extended"
             self._handle_extended_measurement(payload, name, address)
         elif opcode == _OP_MEASUREMENT and length == _LEN_BASIC_MEASUREMENT:
+            self._observed["flavor"] = "basic"
             self._handle_basic_measurement(payload, name, address)
         elif opcode == _OP_STORED_MEASUREMENT:
             self._handle_stored_measurement(payload, address)
@@ -737,14 +814,15 @@ class RenphoQNScale(GattScale):
                 payload.hex(),
             )
             return
-        if payload[3] != _GUEST_USER_ID:
+        if payload[3] not in (_GUEST_USER_ID, _UNASSIGNED_USER_ID):
             # The library always drives the scale in guest mode, so the scale
             # should echo our guest sentinel (0xFE) on every measurement
-            # frame. Anything else means firmware behaviour has shifted under
-            # us; warn loudly on every offending frame.
+            # frame — or, on some firmware, the "attributed to no user" index
+            # (0xF0) on the final. Anything else means firmware behaviour has
+            # shifted under us; warn loudly on every offending frame.
             self._logger.warning(
                 "ES-CS20M frame from %s carries non-guest user_id 0x%02x; "
-                "library expects 0xFE.",
+                "library expects 0xFE (or 0xF0, attributed to no user).",
                 address,
                 payload[3],
             )
@@ -940,6 +1018,7 @@ class RenphoQNScale(GattScale):
                 "ES-CS20M profile resolver cancelled for %s (session ended).",
                 address,
             )
+            self._trace_event("profile resolver cancelled")
             raise
         except Exception:
             self._logger.exception(
@@ -947,6 +1026,7 @@ class RenphoQNScale(GattScale):
                 address,
                 weight_kg,
             )
+            self._trace_event("profile resolver raised")
             return
         if profile is None:
             self._logger.debug(
@@ -956,6 +1036,7 @@ class RenphoQNScale(GattScale):
                 address,
                 weight_kg,
             )
+            self._trace_event("profile resolver returned none")
             return
         self._logger.debug(
             "ES-CS20M profile resolved for %s at weight=%s; overriding "
@@ -963,6 +1044,7 @@ class RenphoQNScale(GattScale):
             address,
             weight_kg,
         )
+        self._trace_event("profile resolved")
         await self._safe_write(_build_command_for_profile(profile))
 
     def _resolve_command_char(self, opcode: int) -> BleakGATTCharacteristic | None:
@@ -995,6 +1077,7 @@ class RenphoQNScale(GattScale):
         try:
             await self._client.write_gatt_char(command_char, data)
             self._logger.debug("ES-CS20M TX payload: %s", data.hex())
+            self._trace_frame("tx", data)
         except Exception:
             self._logger.exception("ES-CS20M failed to send command %s", data.hex())
             self._state_mask = 0
