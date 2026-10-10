@@ -89,6 +89,7 @@ Confirmed-working (QN-series):
 | ES-CS20M       | `ESCS20MN`  | `2A26P-ESCS20MN`  |
 | ES-CS20M       | —           | `2A26P-ESCS20M`   |
 | ES-26M         | `ESCS20MA2` | `2A26P-ESCS20MA2` |
+| ES-28ML        | `ES30MA2`   | `2A26P-ES30MA2`   |
 | ES-30M         | `ES30MA2`   | `2A26P-ES30MA2`   |
 | ES-32MD        | `ESCS20MA2` | `2A26P-ESCS20MA2` |
 | R-MSB01        | —           | `2A26P-RMSB01`    |
