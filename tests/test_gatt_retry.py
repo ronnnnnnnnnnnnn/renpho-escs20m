@@ -58,6 +58,14 @@ def _make_ble_device() -> MagicMock:
     return ble_device
 
 
+@pytest.fixture(autouse=True)
+def clear_cache(monkeypatch) -> AsyncMock:
+    """Keep the tests away from BlueZ."""
+    clear = AsyncMock(return_value=True)
+    monkeypatch.setattr("renpho_escs20m.scale.clear_cache", clear)
+    return clear
+
+
 def _patch_connection(monkeypatch, clients: list[MagicMock]) -> AsyncMock:
     """Patch establish_connection to hand out ``clients`` in order."""
     connect = AsyncMock(side_effect=clients)
@@ -100,6 +108,32 @@ async def test_next_advertisement_retries_and_success_resets_counter(monkeypatch
     good_client.start_notify.assert_awaited_once()
     assert scale._client is good_client
     assert scale._consecutive_setup_failures == 0
+
+
+@pytest.mark.asyncio
+async def test_failed_setup_clears_the_services_cache(monkeypatch, clear_cache):
+    # The incomplete service list stays cached in BlueZ, so a retry without
+    # clearing it fails the same way.
+    scale = _make_scale()
+    _patch_connection(monkeypatch, [_make_client(), _make_client(_FFF0_CHARS)])
+
+    await _advertise(scale)
+    clear_cache.assert_awaited_once_with(ADDRESS)
+
+    await _advertise(scale)
+    clear_cache.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_failing_cache_clear_does_not_stop_the_retry(monkeypatch, clear_cache):
+    clear_cache.side_effect = RuntimeError("no BlueZ")
+    scale = _make_scale()
+    _patch_connection(monkeypatch, [_make_client()])
+
+    await _advertise(scale)
+
+    assert scale._consecutive_setup_failures == 1
+    assert not scale._initializing
 
 
 @pytest.mark.asyncio
