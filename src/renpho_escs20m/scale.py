@@ -31,7 +31,7 @@ from bleak.backends.scanner import (
     BaseBleakScanner,
     get_platform_scanner_backend_type,
 )
-from bleak_retry_connector import establish_connection
+from bleak_retry_connector import clear_cache, establish_connection
 
 from .const import (
     BATTERY_LEVEL_CHARACTERISTIC_UUID,
@@ -609,6 +609,18 @@ class GattScale(RenphoScale, abc.ABC):
         except Exception:
             self._logger.debug("Error disconnecting during teardown", exc_info=True)
 
+    async def _clear_services_cache(self) -> None:
+        """Forget the GATT services cached for this scale.
+
+        A connection that set up with an incomplete service list leaves that
+        list cached in BlueZ, and every retry reuses it, so the retry fails
+        the same way until the scale is out of range long enough for BlueZ
+        to forget it."""
+        try:
+            await clear_cache(self.address)
+        except Exception:
+            self._logger.debug("Could not clear the services cache", exc_info=True)
+
     def _register_setup_failure(self, reason: str) -> None:
         self._trace_event(f"session setup failed: {reason}")
         self._consecutive_setup_failures += 1
@@ -703,6 +715,7 @@ class GattScale(RenphoScale, abc.ABC):
                 await self._start_scale_session(ble_device)
             except ScaleSessionError as ex:
                 await self._teardown_client()
+                await self._clear_services_cache()
                 self._register_setup_failure(str(ex))
                 return
             except Exception as ex:
@@ -710,6 +723,7 @@ class GattScale(RenphoScale, abc.ABC):
                     "Session setup raised: %s(%s)", type(ex), ex.args
                 )
                 await self._teardown_client()
+                await self._clear_services_cache()
                 self._register_setup_failure(type(ex).__name__)
                 return
             self._consecutive_setup_failures = 0
